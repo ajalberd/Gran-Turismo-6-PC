@@ -325,6 +325,8 @@ def build_custom_config(s: Settings, version: str | None, title_id: str = "") ->
             "Show shader compilation hint": False,
             "Prevent display sleep while running games": True,
             "Enable GameMode": s.use_gamemode,
+            # Otherwise the game keeps rendering under the home menu; GT6 lost the Vulkan device there
+            "Pause Emulation During Home Menu": True,
         },
     }
     if s.lan_enabled:

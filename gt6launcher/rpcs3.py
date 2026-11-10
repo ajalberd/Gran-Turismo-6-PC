@@ -257,6 +257,11 @@ class RPCS3:
     def _cmd(self, *args: str) -> list[str]:
         return [self.binary, *args]
 
+    def _workdir(self) -> Optional[str]:
+        """RPCS3's folder, so it finds its bundled Icons/ (home menu) when the config dir is elsewhere."""
+        d = os.path.dirname(os.path.abspath(self.binary))
+        return d if os.path.isdir(os.path.join(d, "Icons")) else None
+
     def _run(self, args: list[str], timeout: Optional[float] = None) -> RunResult:
         seed_gui_settings()
         self.log("$ " + " ".join(f'"{a}"' if " " in a else a for a in args))
@@ -329,14 +334,14 @@ class RPCS3:
         kw = {}
         if not paths.IS_WINDOWS:
             kw["start_new_session"] = True
-        return _popen(cmd, env=env, stdin=subprocess.DEVNULL, **kw)
+        return _popen(cmd, env=env, stdin=subprocess.DEVNULL, cwd=self._workdir(), **kw)
 
     def open_gui(self) -> subprocess.Popen:
         seed_gui_settings()
         kw = {} if paths.IS_WINDOWS else {"start_new_session": True}
         env = _clean_env()
         env["GT6_WINDOW_ICON"] = window_icon()
-        return _popen(self._cmd(), env=env, stdin=subprocess.DEVNULL, **kw)
+        return _popen(self._cmd(), env=env, stdin=subprocess.DEVNULL, cwd=self._workdir(), **kw)
 
     @staticmethod
     def stop(p: subprocess.Popen) -> None:
