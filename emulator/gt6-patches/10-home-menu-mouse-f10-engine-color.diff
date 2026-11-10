@@ -23,7 +23,7 @@ index bf7e98476..e3f7eb7c3 100644
  	{
  		// Clear the window background to opaque black
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
-index c8ecbc6aa..dad100bc1 100644
+index c8ecbc6aa..350a59cd0 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
 @@ -20,6 +20,7 @@ namespace rsx
@@ -42,7 +42,7 @@ index c8ecbc6aa..dad100bc1 100644
 +			handle_navigation(m_main_menu.handle_button_press(button_press, is_auto_repeat, m_auto_repeat_ms_interval));
 +		}
  
-+		void home_menu_dialog::on_mouse_event(const mouse_event& event, s16 x, s16 y)
++		void home_menu_dialog::on_mouse_event(const overlay_mouse_event& event, s16 x, s16 y)
 +		{
 +			if (fade_animation.active) return;
 +
@@ -82,14 +82,14 @@ index c8ecbc6aa..dad100bc1 100644
  		}
  	} // namespace overlays
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
-index ddd002989..7ff4959a7 100644
+index ddd002989..a36049147 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
 @@ -15,12 +15,15 @@ namespace rsx
  
  			void update(u64 timestamp_us) override;
  			void on_button_pressed(pad_button button_press, bool is_auto_repeat) override;
-+			void on_mouse_event(const mouse_event& event, s16 x, s16 y) override;
++			void on_mouse_event(const overlay_mouse_event& event, s16 x, s16 y) override;
  
  			compiled_resource get_compiled() override;
  
@@ -122,16 +122,16 @@ index 50e1bb27e..b8ac116e5 100644
  		public:
  			home_menu_slider(C* setting, const std::string& text, const std::string& suffix, std::map<T, std::string> special_labels = {}, T minimum = C::min, T maximum = C::max)
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
-index ba4f299f9..86ce85dcb 100644
+index ba4f299f9..3717472f3 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
 @@ -319,6 +319,116 @@ namespace rsx
  			return page_navigation::stay;
  		}
  
-+		page_navigation home_menu_page::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		page_navigation home_menu_page::handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my)
 +		{
-+			using type = mouse_event::type;
++			using type = overlay_mouse_event::type;
 +			constexpr s32 drag_step_px = 12;
 +
 +			const auto press = [this](pad_button button)
@@ -243,7 +243,7 @@ index ba4f299f9..86ce85dcb 100644
  		{
  			list_view::translate(_x, _y);
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
-index 0db5f3245..01975cd0c 100644
+index 0db5f3245..040a30393 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
 @@ -31,6 +31,8 @@ namespace rsx
@@ -251,7 +251,7 @@ index 0db5f3245..01975cd0c 100644
  			home_menu_page* get_current_page(bool include_this);
  			virtual page_navigation handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms);
 +			// GT6: mouse input in overlay coordinates, translated to the same actions as pad buttons
-+			virtual page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my);
++			virtual page_navigation handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my);
  
  			void translate(s16 _x, s16 _y) override;
  			void set_size(u16 _w, u16 _h) override;
@@ -268,7 +268,7 @@ index 0db5f3245..01975cd0c 100644
  	}
  }
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
-index 3d8260641..42de98eb7 100644
+index 3d8260641..3f6af44c8 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
 @@ -1,6 +1,7 @@
@@ -292,9 +292,9 @@ index 3d8260641..42de98eb7 100644
  			m_tabs->add_tab(box, panel);
  		}
  
-+		page_navigation home_menu_settings::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		page_navigation home_menu_settings::handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my)
 +		{
-+			using type = mouse_event::type;
++			using type = overlay_mouse_event::type;
 +
 +			const auto press = [this](pad_button button)
 +			{
@@ -374,7 +374,7 @@ index 3d8260641..42de98eb7 100644
  		}
  
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
-index 6d5287bff..8cb47621c 100644
+index 6d5287bff..4a912e29d 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
 @@ -10,18 +10,39 @@ namespace rsx
@@ -407,7 +407,7 @@ index 6d5287bff..8cb47621c 100644
  			home_menu_settings(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
  
  			page_navigation handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms) override;
-+			page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my) override;
++			page_navigation handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my) override;
  			compiled_resource& get_compiled() override;
  
  		private:
@@ -419,14 +419,14 @@ index 6d5287bff..8cb47621c 100644
  
  		struct home_menu_settings_page : public home_menu_page
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
-index faf5a9075..5df34775f 100644
+index faf5a9075..2d1c66a48 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
 @@ -106,6 +106,41 @@ namespace rsx
  			home_menu_page::add_page(home_menu::fa_icon::none, page);
  		}
  
-+		page_navigation home_menu_sidebar_page::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		page_navigation home_menu_sidebar_page::handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my)
 +		{
 +			// Sub pages, dialogs and popups behave like any other page
 +			if (get_current_page(false) || (m_message_box && m_message_box->visible) || m_popup)
@@ -434,7 +434,7 @@ index faf5a9075..5df34775f 100644
 +				return home_menu_page::handle_mouse(event, mx, my);
 +			}
 +
-+			using type = mouse_event::type;
++			using type = overlay_mouse_event::type;
 +			const auto press = [this](pad_button button)
 +			{
 +				return handle_button_press(button, false, user_interface::m_auto_repeat_ms_interval_default);
@@ -465,14 +465,14 @@ index faf5a9075..5df34775f 100644
  		{
  			m_sidebar->select_entry(entry);
 diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
-index 8939ac9f9..70383d3b3 100644
+index 8939ac9f9..6c07c99a2 100644
 --- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
 +++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
 @@ -13,6 +13,7 @@ namespace rsx
  		{
  			home_menu_sidebar_page(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
  
-+			page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my) override;
++			page_navigation handle_mouse(const overlay_mouse_event& event, s16 mx, s16 my) override;
  			void select_entry(s32 entry) override;
  			void select_next(u16 count = 1) override;
  			void select_previous(u16 count = 1) override;
@@ -533,7 +533,7 @@ index cc337d165..4ce4f2263 100644
  			void hide_scroll_indicator(bool hidden = true);
 diff --git a/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h b/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h
 new file mode 100644
-index 000000000..7345ca645
+index 000000000..553072380
 --- /dev/null
 +++ b/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h
 @@ -0,0 +1,87 @@
@@ -554,7 +554,7 @@ index 000000000..7345ca645
 +
 +namespace rsx::overlays
 +{
-+	struct mouse_event
++	struct overlay_mouse_event
 +	{
 +		enum class type : u8 { move, press, release, wheel };
 +
@@ -577,14 +577,14 @@ index 000000000..7345ca645
 +	{
 +		atomic_t<bool> active{false};   // an overlay currently consumes mouse input
 +
-+		void push(const mouse_event& e)
++		void push(const overlay_mouse_event& e)
 +		{
 +			if (!active) return;
 +			std::lock_guard lock(m_mutex);
 +			if (m_events.size() < 512) m_events.push_back(e);
 +		}
 +
-+		std::vector<mouse_event> take()
++		std::vector<overlay_mouse_event> take()
 +		{
 +			std::lock_guard lock(m_mutex);
 +			return std::exchange(m_events, {});
@@ -617,7 +617,7 @@ index 000000000..7345ca645
 +
 +	private:
 +		std::mutex m_mutex;
-+		std::vector<mouse_event> m_events;
++		std::vector<overlay_mouse_event> m_events;
 +		atomic_t<u64> m_area_pos{0};
 +		atomic_t<u64> m_area_size{0};
 +	};
@@ -625,7 +625,7 @@ index 000000000..7345ca645
 +	inline mouse_input_queue g_mouse_input;
 +}
 diff --git a/rpcs3/Emu/RSX/Overlays/overlays.cpp b/rpcs3/Emu/RSX/Overlays/overlays.cpp
-index 425b3fe56..e9137e47e 100644
+index 425b3fe56..30992177b 100644
 --- a/rpcs3/Emu/RSX/Overlays/overlays.cpp
 +++ b/rpcs3/Emu/RSX/Overlays/overlays.cpp
 @@ -184,6 +184,27 @@ namespace rsx
@@ -635,8 +635,8 @@ index 425b3fe56..e9137e47e 100644
 +				// GT6: mouse input (home menu)
 +				if (m_mouse_input_enabled)
 +				{
-+					const std::vector<mouse_event> events = g_mouse_input.take();
-+					for (const mouse_event& e : events)
++					const std::vector<overlay_mouse_event> events = g_mouse_input.take();
++					for (const overlay_mouse_event& e : events)
 +					{
 +						if (m_stop_input_loop) break;
 +
@@ -657,7 +657,7 @@ index 425b3fe56..e9137e47e 100644
  				// Ignored if a keyboard pad handler is active in order to prevent double input.
  				if (m_keyboard_input_enabled && !m_keyboard_pad_handler_active && input::g_keyboards_intercepted)
 diff --git a/rpcs3/Emu/RSX/Overlays/overlays.h b/rpcs3/Emu/RSX/Overlays/overlays.h
-index 897807081..7c860a602 100644
+index 897807081..04ce783fe 100644
 --- a/rpcs3/Emu/RSX/Overlays/overlays.h
 +++ b/rpcs3/Emu/RSX/Overlays/overlays.h
 @@ -1,6 +1,7 @@
@@ -681,7 +681,7 @@ index 897807081..7c860a602 100644
  			virtual void on_key_pressed(u32 /*led*/, u32 /*mkey*/, u32 /*key_code*/, u32 /*out_key_code*/, bool /*pressed*/, std::u32string /*key*/) {}
  			virtual void on_button_released(pad_button /*button_released*/) {}
 +			// GT6: mouse event, position already mapped to overlay virtual coordinates
-+			virtual void on_mouse_event(const mouse_event& /*event*/, s16 /*x*/, s16 /*y*/) {}
++			virtual void on_mouse_event(const overlay_mouse_event& /*event*/, s16 /*x*/, s16 /*y*/) {}
  
  			virtual void close(bool use_callback, bool stop_pad_interception);
  
@@ -829,7 +829,7 @@ index 216543d81..35e0b18ce 100644
  
  		struct node_vk : cfg::node
 diff --git a/rpcs3/rpcs3qt/gs_frame.cpp b/rpcs3/rpcs3qt/gs_frame.cpp
-index c52c84b2f..2ef980d97 100644
+index c52c84b2f..77269b5a1 100644
 --- a/rpcs3/rpcs3qt/gs_frame.cpp
 +++ b/rpcs3/rpcs3qt/gs_frame.cpp
 @@ -20,6 +20,7 @@
@@ -870,21 +870,21 @@ index c52c84b2f..2ef980d97 100644
 +// GT6: forward mouse input to the home menu (see Emu/RSX/Overlays/overlay_mouse_input.h)
 +static void forward_overlay_mouse_event(QEvent* ev, qreal dpr)
 +{
-+	using namespace rsx::overlays;
++	namespace ov = rsx::overlays;
 +
 +	const auto to_button = [](Qt::MouseButton button) -> u8
 +	{
 +		switch (button)
 +		{
-+		case Qt::LeftButton: return mouse_left;
-+		case Qt::RightButton: return mouse_right;
-+		case Qt::MiddleButton: return mouse_middle;
-+		case Qt::BackButton: return mouse_back;
++		case Qt::LeftButton: return ov::mouse_left;
++		case Qt::RightButton: return ov::mouse_right;
++		case Qt::MiddleButton: return ov::mouse_middle;
++		case Qt::BackButton: return ov::mouse_back;
 +		default: return 0;
 +		}
 +	};
 +
-+	mouse_event e{};
++	ov::overlay_mouse_event e{};
 +
 +	switch (ev->type())
 +	{
@@ -894,14 +894,14 @@ index c52c84b2f..2ef980d97 100644
 +	case QEvent::MouseButtonRelease:
 +	{
 +		const auto* me = static_cast<QMouseEvent*>(ev);
-+		e.kind = ev->type() == QEvent::MouseMove ? mouse_event::type::move
-+			: ev->type() == QEvent::MouseButtonRelease ? mouse_event::type::release
-+			: mouse_event::type::press;
++		e.kind = ev->type() == QEvent::MouseMove ? ov::overlay_mouse_event::type::move
++			: ev->type() == QEvent::MouseButtonRelease ? ov::overlay_mouse_event::type::release
++			: ov::overlay_mouse_event::type::press;
 +		e.button = to_button(me->button());
 +		const QPointF pos = me->position() * dpr;
 +		e.x = static_cast<s32>(pos.x());
 +		e.y = static_cast<s32>(pos.y());
-+		g_mouse_input.push(e);
++		ov::g_mouse_input.push(e);
 +		break;
 +	}
 +	case QEvent::Wheel:
@@ -912,12 +912,12 @@ index c52c84b2f..2ef980d97 100644
 +		const int notches = accumulated / 120;
 +		if (!notches) break;
 +		accumulated -= notches * 120;
-+		e.kind = mouse_event::type::wheel;
++		e.kind = ov::overlay_mouse_event::type::wheel;
 +		e.wheel = notches;
 +		const QPointF pos = we->position() * dpr;
 +		e.x = static_cast<s32>(pos.x());
 +		e.y = static_cast<s32>(pos.y());
-+		g_mouse_input.push(e);
++		ov::g_mouse_input.push(e);
 +		break;
 +	}
 +	default:
