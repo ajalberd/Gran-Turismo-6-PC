@@ -164,6 +164,8 @@ GUI_SEED = {
     "Meta": {"showDebugTab": "true", "currentStylesheet": THEME_NAME},
     # hide the mouse pointer over the game window after 2 s without mouse movement
     "GSFrame": {"hideMouseOnIdle": "true", "hideMouseOnIdleTime": "2000"},
+    # in-game home menu (Xbox/PS button menu) on F10; the GT6-patched build also accepts Shift+F10
+    "Shortcuts": {"gw_home_menu": "F10"},
 }
 
 

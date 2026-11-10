@@ -77,6 +77,28 @@ LANGUAGES = ["auto", "English (UK)", "English (US)", "German", "French", "Spanis
              "Portuguese (Portugal)", "Portuguese (Brazil)", "Polish", "Russian", "Turkish", "Finnish", "Swedish",
              "Danish", "Norwegian", "Japanese", "Korean", "Chinese (Traditional)", "Chinese (Simplified)"]
 SPU_BLOCK = ["Safe", "Mega", "Giga"]
+# Color grading in the GT6-patched RPCS3 (emulator patch 09): setting key -> RPCS3 "Video/Color Grading" key.
+# All sliders are -100..100, 0 = neutral. Also editable live in the in-game home menu (Settings -> Color).
+COLOR_GRADING = {
+    "cg_brightness": "Brightness",
+    "cg_contrast": "Contrast",
+    "cg_gamma": "Gamma",
+    "cg_shadows": "Shadows",
+    "cg_highlights": "Highlights",
+    "cg_saturation": "Saturation",
+    "cg_vibrance": "Vibrance",
+    "cg_temperature": "Temperature",
+    "cg_tint": "Tint",
+}
+# GT6's own color correction (engine_color.py game patch, EU 1.22): setting key -> RPCS3 key in the same node.
+# -100..100, 0 = neutral; the GT6-patched emulator also exposes them live in the home menu while the patch is on.
+ENGINE_COLOR = {
+    "cge_gain_r": "Engine Gain R", "cge_gain_g": "Engine Gain G", "cge_gain_b": "Engine Gain B",
+    "cge_bias_r": "Engine Bias R", "cge_bias_g": "Engine Bias G", "cge_bias_b": "Engine Bias B",
+    "cge_gamma_r": "Engine Gamma R", "cge_gamma_g": "Engine Gamma G", "cge_gamma_b": "Engine Gamma B",
+    "cge_chroma": "Engine Chroma",
+}
+GRADING_SLIDERS = {**COLOR_GRADING, **ENGINE_COLOR}
 SCHEDULERS = ["Operating System", "RPCS3 Scheduler", "RPCS3 Alternative Scheduler"]
 
 
@@ -102,6 +124,30 @@ class Settings:
     fov_roof: int = 0
     fov_chase: int = 0
     performance_overlay: bool = False
+    # color grading (GT6-patched RPCS3 video-out pass), see COLOR_GRADING
+    color_grading: bool = False
+    cg_brightness: int = 0
+    cg_contrast: int = 0
+    cg_gamma: int = 0
+    cg_shadows: int = 0
+    cg_highlights: int = 0
+    cg_saturation: int = 0
+    cg_vibrance: int = 0
+    cg_temperature: int = 0
+    cg_tint: int = 0
+    cg_dither: bool = True
+    # GT6's own color correction (game patch), see ENGINE_COLOR
+    engine_color: bool = False
+    cge_gain_r: int = 0
+    cge_gain_g: int = 0
+    cge_gain_b: int = 0
+    cge_bias_r: int = 0
+    cge_bias_g: int = 0
+    cge_bias_b: int = 0
+    cge_gamma_r: int = 0
+    cge_gamma_g: int = 0
+    cge_gamma_b: int = 0
+    cge_chroma: int = 0
     # emulation
     renderer: str = "Vulkan"
     gpu_adapter: str = ""            # empty = RPCS3 default
@@ -151,6 +197,11 @@ class Settings:
         for k, choices in _CHOICES.items():
             if getattr(s, k) not in choices:
                 setattr(s, k, getattr(default, k))
+        for k in GRADING_SLIDERS:
+            try:
+                setattr(s, k, max(-100, min(100, int(getattr(s, k)))))
+            except (TypeError, ValueError):
+                setattr(s, k, 0)
         for f in fields(cls):
             dv = getattr(default, f.name)
             v = getattr(s, f.name)
@@ -194,6 +245,31 @@ def console_region(title_id: str) -> tuple[str, str]:
     return area, DEFAULT_LANGUAGE.get(area, "English (US)")
 
 
+def color_grading_config(s: Settings) -> dict[str, Any]:
+    """RPCS3 ``Video/Color Grading`` node (only read by the GT6-patched build, ignored by stock RPCS3)."""
+    node: dict[str, Any] = {"Enabled": s.color_grading, "Dither": s.cg_dither}
+    node.update({rk: int(getattr(s, k)) for k, rk in GRADING_SLIDERS.items()})
+    return node
+
+
+def color_grading_from_config(node: Any) -> dict[str, Any]:
+    """Inverse of :func:`color_grading_config` for a node read back with the string loader
+    (the in-game home menu saves its sliders into the per-game config)."""
+    if not isinstance(node, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, rk in (("color_grading", "Enabled"), ("cg_dither", "Dither")):
+        v = str(node.get(rk, "")).strip().lower()
+        if v in ("true", "false"):
+            out[key] = v == "true"
+    for k, rk in GRADING_SLIDERS.items():
+        try:
+            out[k] = max(-100, min(100, int(str(node.get(rk)).strip())))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def build_custom_config(s: Settings, version: str | None, title_id: str = "") -> dict[str, Any]:
     """RPCS3 per-game config (only the keys we care about; RPCS3 fills the rest)."""
     cb, cpu_blit = render_flags(s, version)
@@ -223,6 +299,7 @@ def build_custom_config(s: Settings, version: str | None, title_id: str = "") ->
         "Vulkan": {"Asynchronous Texture Streaming": s.async_texture_streaming},
         "Performance Overlay": {"Enabled": s.performance_overlay, "Enable Framerate Graph": s.performance_overlay,
                                 "Enable Frametime Graph": s.performance_overlay, "Detail level": "Medium"},
+        "Color Grading": color_grading_config(s),
     }
     if s.gpu_adapter:
         video["Vulkan"]["Adapter"] = s.gpu_adapter
@@ -314,6 +391,9 @@ def desired_patches(s: Settings, version: str | None) -> dict[str, dict[str, flo
     want["Auto Exposure Resolution Scale Fix"] = {}
     want["Smoke and Dust Resolution Scale Fix"] = {}
     want["Movie Playback Fix"] = {}
+    if s.engine_color:
+        from . import engine_color
+        want[engine_color.PATCH_NAME] = engine_color.patch_values(s)
     if s.lan_enabled or s.dev_menu:
         want["Develop Settings"] = {}
     if s.lan_enabled:

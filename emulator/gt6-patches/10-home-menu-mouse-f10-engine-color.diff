@@ -1,0 +1,970 @@
+diff --git a/rpcs3/Emu/RSX/GL/GLPresent.cpp b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+index bf7e98476..e3f7eb7c3 100644
+--- a/rpcs3/Emu/RSX/GL/GLPresent.cpp
++++ b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+@@ -8,6 +8,8 @@
+ #include "Emu/Cell/Modules/cellVideoOut.h"
+ #include "Emu/RSX/Overlays/overlay_manager.h"
+ #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
++#include "Emu/RSX/Overlays/overlay_mouse_input.h"
++#include "Emu/RSX/gt6_engine_color.h"
+ 
+ #include "util/video_provider.h"
+ 
+@@ -292,6 +294,10 @@ bool GLGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 		aspect_ratio = { 0, 0, width, height };
+ 	}
+ 
++	// GT6: overlay mouse mapping and live engine color correction
++	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
++	rsx::gt6::update_engine_color();
++
+ 	if (!image_to_flip || aspect_ratio.x1 || aspect_ratio.y1)
+ 	{
+ 		// Clear the window background to opaque black
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
+index c8ecbc6aa..dad100bc1 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
+@@ -20,6 +20,7 @@ namespace rsx
+ 			: m_main_menu(20, 85, virtual_width - 2 * 20, 540, false, nullptr)
+ 		{
+ 			m_allow_input_on_pause = true;
++			m_mouse_input_enabled = true; // GT6: clickable home menu
+ 
+ 			m_dim_background.set_size(virtual_width, virtual_height);
+ 			m_dim_background.back_color = {0.027f, 0.027f, 0.039f, 0.90f};
+@@ -79,8 +80,18 @@ namespace rsx
+ 				break;
+ 			}
+ 
+-			const page_navigation navigation = m_main_menu.handle_button_press(button_press, is_auto_repeat, m_auto_repeat_ms_interval);
++			handle_navigation(m_main_menu.handle_button_press(button_press, is_auto_repeat, m_auto_repeat_ms_interval));
++		}
+ 
++		void home_menu_dialog::on_mouse_event(const mouse_event& event, s16 x, s16 y)
++		{
++			if (fade_animation.active) return;
++
++			handle_navigation(m_main_menu.handle_mouse(event, x, y));
++		}
++
++		void home_menu_dialog::handle_navigation(page_navigation navigation)
++		{
+ 			switch (navigation)
+ 			{
+ 			case page_navigation::back:
+@@ -112,6 +123,7 @@ namespace rsx
+ 
+ 				fade_animation.on_finish = [this, navigation]
+ 				{
++					g_mouse_input.active = false;
+ 					close(true, true);
+ 
+ 					if (g_cfg.misc.pause_during_home_menu)
+@@ -166,6 +178,9 @@ namespace rsx
+ 			this->on_close = std::move(on_close);
+ 			visible = true;
+ 
++			g_mouse_input.clear();
++			g_mouse_input.active = true;
++
+ 			const auto notify = std::make_shared<atomic_t<u32>>(0);
+ 			auto& overlayman = g_fxo->get<display_manager>();
+ 
+@@ -187,6 +202,8 @@ namespace rsx
+ 				notify->wait(false, atomic_wait_timeout{1'000'000});
+ 			}
+ 
++			g_mouse_input.active = false;
++
+ 			return CELL_OK;
+ 		}
+ 	} // namespace overlays
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
+index ddd002989..7ff4959a7 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.h
+@@ -15,12 +15,15 @@ namespace rsx
+ 
+ 			void update(u64 timestamp_us) override;
+ 			void on_button_pressed(pad_button button_press, bool is_auto_repeat) override;
++			void on_mouse_event(const mouse_event& event, s16 x, s16 y) override;
+ 
+ 			compiled_resource get_compiled() override;
+ 
+ 			error_code show(std::function<void(s32 status)> on_close);
+ 
+ 		private:
++			void handle_navigation(page_navigation navigation);
++
+ 			home_menu_main_menu m_main_menu;
+ 			overlay_element m_dim_background{};
+ 			label m_description{};
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
+index 50e1bb27e..b8ac116e5 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
+@@ -288,8 +288,14 @@ namespace rsx
+ 			compiled_resource m_popup_compiled_resources;
+ 		};
+ 
++		// GT6: lets mouse input recognise sliders (drag / wheel adjust instead of click-to-activate)
++		struct home_menu_slider_tag
++		{
++			virtual ~home_menu_slider_tag() = default;
++		};
++
+ 		template <typename T, typename C>
+-		struct home_menu_slider : public home_menu_setting<T, C>
++		struct home_menu_slider : public home_menu_setting<T, C>, public home_menu_slider_tag
+ 		{
+ 		public:
+ 			home_menu_slider(C* setting, const std::string& text, const std::string& suffix, std::map<T, std::string> special_labels = {}, T minimum = C::min, T maximum = C::max)
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
+index ba4f299f9..86ce85dcb 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
+@@ -319,6 +319,116 @@ namespace rsx
+ 			return page_navigation::stay;
+ 		}
+ 
++		page_navigation home_menu_page::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		{
++			using type = mouse_event::type;
++			constexpr s32 drag_step_px = 12;
++
++			const auto press = [this](pad_button button)
++			{
++				return handle_button_press(button, false, user_interface::m_auto_repeat_ms_interval_default);
++			};
++			const bool left_press = event.kind == type::press && event.button == mouse_left;
++			const bool back_press = event.kind == type::press && (event.button == mouse_right || event.button == mouse_back);
++			const auto is_slider = [](const overlay_element* e) { return dynamic_cast<const home_menu_slider_tag*>(e) != nullptr; };
++			const auto inside = [mx, my](const overlay_element& e) { return mx >= e.x && mx < e.x + e.w && my >= e.y && my < e.y + e.h; };
++
++			if (event.kind == type::release)
++			{
++				m_mouse_dragging = false;
++			}
++
++			// Yes/No dialog: left click accepts, right click cancels
++			if (m_message_box && m_message_box->visible)
++			{
++				if (left_press) return press(pad_button::cross);
++				if (back_press) return press(pad_button::circle);
++				return page_navigation::stay;
++			}
++
++			if (home_menu_page* page = get_current_page(false))
++			{
++				return page->handle_mouse(event, mx, my);
++			}
++
++			// Popup list (dropdowns): wheel moves, left click picks, right click closes
++			if (m_popup && m_popup.input_hook)
++			{
++				if (left_press) return press(pad_button::cross);
++				if (back_press) return press(pad_button::circle);
++				if (event.kind == type::wheel) return press(event.wheel > 0 ? pad_button::dpad_up : pad_button::dpad_down);
++				return page_navigation::stay;
++			}
++
++			switch (event.kind)
++			{
++			case type::press:
++			{
++				if (back_press) return press(pad_button::circle);
++				if (!left_press) return page_navigation::stay;
++
++				if (m_config_changed && *m_config_changed)
++				{
++					if (inside(m_save_btn)) return press(pad_button::square);
++					if (inside(m_discard_btn)) return press(pad_button::triangle);
++					if (show_reset_button() && inside(m_reset_btn)) return press(pad_button::select);
++				}
++
++				const s32 index = entry_at(mx, my);
++				if (index < 0) return page_navigation::stay;
++
++				if (index != get_selected_index())
++				{
++					select_entry(index);
++					play_sound(sound_effect::cursor);
++				}
++
++				if (is_slider(get_selected_entry()))
++				{
++					m_mouse_dragging = true;
++					m_drag_origin_x = mx;
++					m_drag_steps = 0;
++					return page_navigation::stay;
++				}
++
++				return press(pad_button::cross);
++			}
++			case type::move:
++			{
++				if (m_mouse_dragging)
++				{
++					const s32 steps = (mx - m_drag_origin_x) / drag_step_px;
++					page_navigation navigation = page_navigation::stay;
++					for (; m_drag_steps < steps; m_drag_steps++) navigation = handle_button_press(pad_button::dpad_right, true, 10);
++					for (; m_drag_steps > steps; m_drag_steps--) navigation = handle_button_press(pad_button::dpad_left, true, 10);
++					return navigation;
++				}
++
++				// Hover selects
++				const s32 index = entry_at(mx, my);
++				if (index >= 0 && index != get_selected_index())
++				{
++					select_entry(index);
++				}
++				return page_navigation::stay;
++			}
++			case type::wheel:
++			{
++				const s32 index = entry_at(mx, my);
++				if (index >= 0 && is_slider(get_entry(index)))
++				{
++					if (index != get_selected_index()) select_entry(index);
++					return press(event.wheel > 0 ? pad_button::dpad_right : pad_button::dpad_left);
++				}
++				return press(event.wheel > 0 ? pad_button::dpad_up : pad_button::dpad_down);
++			}
++			case type::release:
++				break;
++			}
++
++			return page_navigation::stay;
++		}
++
+ 		void home_menu_page::translate(s16 _x, s16 _y)
+ 		{
+ 			list_view::translate(_x, _y);
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
+index 0db5f3245..01975cd0c 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
+@@ -31,6 +31,8 @@ namespace rsx
+ 			void set_current_page(home_menu_page* page);
+ 			home_menu_page* get_current_page(bool include_this);
+ 			virtual page_navigation handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms);
++			// GT6: mouse input in overlay coordinates, translated to the same actions as pad buttons
++			virtual page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my);
+ 
+ 			void translate(s16 _x, s16 _y) override;
+ 			void set_size(u16 _w, u16 _h) override;
+@@ -66,6 +68,11 @@ namespace rsx
+ 			image_button m_discard_btn;
+ 			std::vector<std::unique_ptr<overlay_element>> m_entries;
+ 			std::vector<std::function<page_navigation(pad_button)>> m_callbacks;
++
++			// GT6: slider drag state
++			bool m_mouse_dragging = false;
++			s16 m_drag_origin_x = 0;
++			s32 m_drag_steps = 0;
+ 		};
+ 	}
+ }
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+index 3d8260641..42de98eb7 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+@@ -1,6 +1,7 @@
+ #include "stdafx.h"
+ #include "overlay_home_menu_settings.h"
+ #include "Emu/system_config.h"
++#include "Emu/RSX/gt6_engine_color.h"
+ 
+ namespace rsx
+ {
+@@ -9,7 +10,7 @@ namespace rsx
+ 		home_menu_settings::home_menu_settings(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
+ 			: home_menu_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS))
+ 		{
+-			m_tabs = std::make_unique<tabbed_container>(width, height, 300);
++			m_tabs = std::make_unique<home_menu_tabs>(width, height, 300);
+ 			m_tabs->set_pos(x, y);
+ 			m_tabs->set_headers_background_color({ 0.082f, 0.082f, 0.106f, 0.95f });
+ 
+@@ -60,6 +61,62 @@ namespace rsx
+ 			m_tabs->add_tab(box, panel);
+ 		}
+ 
++		page_navigation home_menu_settings::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		{
++			using type = mouse_event::type;
++
++			const auto press = [this](pad_button button)
++			{
++				return handle_button_press(button, false, user_interface::m_auto_repeat_ms_interval_default);
++			};
++			const bool left_press = event.kind == type::press && event.button == mouse_left;
++			const bool back_press = event.kind == type::press && (event.button == mouse_right || event.button == mouse_back);
++			auto page = ensure(dynamic_cast<home_menu_page*>(m_tabs->get_selected()));
++
++			// Click on a tab header: switch to that tab and enter it
++			if (const s32 header = m_tabs->header_at(mx, my); header >= 0 && !(page->m_message_box && page->m_message_box->visible))
++			{
++				if (left_press)
++				{
++					if (!m_tabs->is_in_selection_mode())
++					{
++						page->on_deactivate();
++						m_tabs->toggle_selection_mode();
++					}
++
++					m_tabs->set_selected_tab(static_cast<u32>(header));
++					m_tabs->toggle_selection_mode();
++					ensure(dynamic_cast<home_menu_page*>(m_tabs->get_selected()))->on_activate();
++					play_sound(sound_effect::accept);
++					return page_navigation::stay;
++				}
++
++				if (back_press) return press(pad_button::circle);
++				if (event.kind == type::wheel && m_tabs->is_in_selection_mode()) return press(event.wheel > 0 ? pad_button::dpad_up : pad_button::dpad_down);
++				return page_navigation::stay;
++			}
++
++			if (m_tabs->is_in_selection_mode())
++			{
++				if (back_press) return press(pad_button::circle);
++				if (event.kind == type::wheel) return press(event.wheel > 0 ? pad_button::dpad_up : pad_button::dpad_down);
++				if (!left_press) return page_navigation::stay;
++
++				// Click into the tab's content: enter it, then let the page handle the click
++				m_tabs->toggle_selection_mode();
++				page->on_activate();
++			}
++
++			const page_navigation navigation = page->handle_mouse(event, mx, my);
++			if (navigation == page_navigation::exit)
++			{
++				m_tabs->toggle_selection_mode();
++				page->on_deactivate();
++				return page_navigation::stay;
++			}
++			return navigation;
++		}
++
+ 		page_navigation home_menu_settings::handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms)
+ 		{
+ 			if (!m_tabs->is_in_selection_mode())
+@@ -193,6 +250,21 @@ namespace rsx
+ 			add_signed_slider(&cg.tint, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TINT, "", 5);
+ 			add_checkbox(&cg.dither, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_DITHER);
+ 
++			// GT6's own color correction: only while the launcher's engine color game patch is active
++			if (rsx::gt6::engine_color_hook_active())
++			{
++				add_signed_slider(&cg.engine_gain_r, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_R, "", 5);
++				add_signed_slider(&cg.engine_gain_g, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_G, "", 5);
++				add_signed_slider(&cg.engine_gain_b, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_B, "", 5);
++				add_signed_slider(&cg.engine_bias_r, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_R, "", 5);
++				add_signed_slider(&cg.engine_bias_g, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_G, "", 5);
++				add_signed_slider(&cg.engine_bias_b, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_B, "", 5);
++				add_signed_slider(&cg.engine_gamma_r, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_R, "", 5);
++				add_signed_slider(&cg.engine_gamma_g, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_G, "", 5);
++				add_signed_slider(&cg.engine_gamma_b, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_B, "", 5);
++				add_signed_slider(&cg.engine_chroma, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_CHROMA, "", 5);
++			}
++
+ 			apply_layout();
+ 		}
+ 
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+index 6d5287bff..8cb47621c 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+@@ -10,18 +10,39 @@ namespace rsx
+ {
+ 	namespace overlays
+ 	{
++		// GT6: tab container with mouse hit testing on the tab headers
++		struct home_menu_tabs : public tabbed_container
++		{
++			using tabbed_container::tabbed_container;
++
++			// Tab header under a point (overlay coordinates), -1 if none
++			s32 header_at(s16 px, s16 py) const
++			{
++				for (const auto& item : m_items)
++				{
++					// The header column is the only list_view the container owns directly
++					if (const auto* headers = dynamic_cast<const list_view*>(item.get()))
++					{
++						return headers->entry_at(px, py);
++					}
++				}
++				return -1;
++			}
++		};
++
+ 		struct home_menu_settings : public home_menu_page
+ 		{
+ 		public:
+ 			home_menu_settings(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+ 
+ 			page_navigation handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms) override;
++			page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my) override;
+ 			compiled_resource& get_compiled() override;
+ 
+ 		private:
+ 			void add_page(home_menu::fa_icon icon, std::shared_ptr<home_menu_page> page) override;
+ 
+-			std::unique_ptr<tabbed_container> m_tabs;
++			std::unique_ptr<home_menu_tabs> m_tabs;
+ 		};
+ 
+ 		struct home_menu_settings_page : public home_menu_page
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
+index faf5a9075..5df34775f 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.cpp
+@@ -106,6 +106,41 @@ namespace rsx
+ 			home_menu_page::add_page(home_menu::fa_icon::none, page);
+ 		}
+ 
++		page_navigation home_menu_sidebar_page::handle_mouse(const mouse_event& event, s16 mx, s16 my)
++		{
++			// Sub pages, dialogs and popups behave like any other page
++			if (get_current_page(false) || (m_message_box && m_message_box->visible) || m_popup)
++			{
++				return home_menu_page::handle_mouse(event, mx, my);
++			}
++
++			using type = mouse_event::type;
++			const auto press = [this](pad_button button)
++			{
++				return handle_button_press(button, false, user_interface::m_auto_repeat_ms_interval_default);
++			};
++
++			// The visible entries are the sidebar's; indices match the page's own list
++			const s32 index = m_sidebar->entry_at(mx, my);
++
++			switch (event.kind)
++			{
++			case type::press:
++				if (event.button == mouse_right || event.button == mouse_back) return press(pad_button::circle);
++				if (event.button != mouse_left || index < 0) return page_navigation::stay;
++				if (index != get_selected_index()) select_entry(index);
++				return press(pad_button::cross);
++			case type::move:
++				if (index >= 0 && index != get_selected_index()) select_entry(index);
++				return page_navigation::stay;
++			case type::wheel:
++				return press(event.wheel > 0 ? pad_button::dpad_up : pad_button::dpad_down);
++			case type::release:
++				break;
++			}
++			return page_navigation::stay;
++		}
++
+ 		void home_menu_sidebar_page::select_entry(s32 entry)
+ 		{
+ 			m_sidebar->select_entry(entry);
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
+index 8939ac9f9..70383d3b3 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_sidebar_page.h
+@@ -13,6 +13,7 @@ namespace rsx
+ 		{
+ 			home_menu_sidebar_page(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+ 
++			page_navigation handle_mouse(const mouse_event& event, s16 mx, s16 my) override;
+ 			void select_entry(s32 entry) override;
+ 			void select_next(u16 count = 1) override;
+ 			void select_previous(u16 count = 1) override;
+diff --git a/rpcs3/Emu/RSX/Overlays/overlay_list_view.cpp b/rpcs3/Emu/RSX/Overlays/overlay_list_view.cpp
+index 9ca9fddc1..8b4a7cc62 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlay_list_view.cpp
++++ b/rpcs3/Emu/RSX/Overlays/overlay_list_view.cpp
+@@ -82,6 +82,35 @@ namespace rsx
+ 			return m_items[current_index].get();
+ 		}
+ 
++		const overlay_element* list_view::get_entry(s32 entry) const
++		{
++			if (entry < 0) return nullptr;
++			const usz index = static_cast<usz>(entry) * (m_use_separators ? 2 : 1);
++			return index < m_items.size() ? m_items[index].get() : nullptr;
++		}
++
++		s32 list_view::entry_at(s16 px, s16 py) const
++		{
++			if (!is_visible() || px < x || px >= x + w || py < y || py >= y + h)
++			{
++				return -1;
++			}
++
++			for (s32 i = 0; i < m_elements_count; i++)
++			{
++				const overlay_element* e = get_entry(i);
++				if (!e) continue;
++
++				const s32 top = e->y - scroll_offset_value;
++				const s32 bottom = top + e->h + pack_padding;
++				if (py >= top && py < bottom && px >= e->x && px < e->x + e->w)
++				{
++					return i;
++				}
++			}
++			return -1;
++		}
++
+ 		void list_view::update_selection()
+ 		{
+ 			const overlay_element* current_element = get_selected_entry();
+diff --git a/rpcs3/Emu/RSX/Overlays/overlay_list_view.hpp b/rpcs3/Emu/RSX/Overlays/overlay_list_view.hpp
+index cc337d165..4ce4f2263 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlay_list_view.hpp
++++ b/rpcs3/Emu/RSX/Overlays/overlay_list_view.hpp
+@@ -52,6 +52,10 @@ namespace rsx
+ 			s32 get_selected_index() const;
+ 			bool get_cancel_only() const;
+ 			const overlay_element* get_selected_entry() const;
++			const overlay_element* get_entry(s32 entry) const;
++
++			// GT6: index of the entry under a point in overlay coordinates, -1 if none
++			s32 entry_at(s16 px, s16 py) const;
+ 
+ 			void hide_prompt_buttons(bool hidden = true);
+ 			void hide_scroll_indicator(bool hidden = true);
+diff --git a/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h b/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h
+new file mode 100644
+index 000000000..7345ca645
+--- /dev/null
++++ b/rpcs3/Emu/RSX/Overlays/overlay_mouse_input.h
+@@ -0,0 +1,87 @@
++#pragma once
++
++// GT6: mouse input for native overlays (the home menu).
++// The game window (Qt) pushes events while an overlay has asked for mouse input; the overlay's input
++// thread drains them. Positions are window pixels (device pixels, same space as the swapchain); the
++// presenter publishes the rectangle the overlays are drawn into so they can be mapped to the overlay's
++// virtual 1280x720 space.
++
++#include "util/types.hpp"
++#include "util/atomic.hpp"
++
++#include <mutex>
++#include <utility>
++#include <vector>
++
++namespace rsx::overlays
++{
++	struct mouse_event
++	{
++		enum class type : u8 { move, press, release, wheel };
++
++		type kind = type::move;
++		u8 button = 0;   // 1 = left, 2 = right, 3 = middle, 4 = back
++		s32 x = 0;       // window device pixels
++		s32 y = 0;
++		s32 wheel = 0;   // notches, positive = away from the user
++	};
++
++	enum mouse_button : u8
++	{
++		mouse_left = 1,
++		mouse_right = 2,
++		mouse_middle = 3,
++		mouse_back = 4,
++	};
++
++	struct mouse_input_queue
++	{
++		atomic_t<bool> active{false};   // an overlay currently consumes mouse input
++
++		void push(const mouse_event& e)
++		{
++			if (!active) return;
++			std::lock_guard lock(m_mutex);
++			if (m_events.size() < 512) m_events.push_back(e);
++		}
++
++		std::vector<mouse_event> take()
++		{
++			std::lock_guard lock(m_mutex);
++			return std::exchange(m_events, {});
++		}
++
++		void clear()
++		{
++			std::lock_guard lock(m_mutex);
++			m_events.clear();
++		}
++
++		// Called by the presenter every frame: where the overlays are drawn, in window device pixels
++		void set_area(s32 x, s32 y, s32 w, s32 h)
++		{
++			m_area_pos = (static_cast<u64>(static_cast<u32>(x)) << 32) | static_cast<u32>(y);
++			m_area_size = (static_cast<u64>(static_cast<u32>(w)) << 32) | static_cast<u32>(h);
++		}
++
++		// Window pixels -> overlay virtual coordinates. False when no frame has been presented yet.
++		bool to_virtual(s32 px, s32 py, u16 virtual_w, u16 virtual_h, s16& vx, s16& vy) const
++		{
++			const u64 pos = m_area_pos, size = m_area_size;
++			const s32 ax = static_cast<s32>(pos >> 32), ay = static_cast<s32>(pos & 0xffffffff);
++			const s32 aw = static_cast<s32>(size >> 32), ah = static_cast<s32>(size & 0xffffffff);
++			if (aw <= 0 || ah <= 0) return false;
++			vx = static_cast<s16>(static_cast<s64>(px - ax) * virtual_w / aw);
++			vy = static_cast<s16>(static_cast<s64>(py - ay) * virtual_h / ah);
++			return true;
++		}
++
++	private:
++		std::mutex m_mutex;
++		std::vector<mouse_event> m_events;
++		atomic_t<u64> m_area_pos{0};
++		atomic_t<u64> m_area_size{0};
++	};
++
++	inline mouse_input_queue g_mouse_input;
++}
+diff --git a/rpcs3/Emu/RSX/Overlays/overlays.cpp b/rpcs3/Emu/RSX/Overlays/overlays.cpp
+index 425b3fe56..e9137e47e 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlays.cpp
++++ b/rpcs3/Emu/RSX/Overlays/overlays.cpp
+@@ -184,6 +184,27 @@ namespace rsx
+ 					continue;
+ 				}
+ 
++				// GT6: mouse input (home menu)
++				if (m_mouse_input_enabled)
++				{
++					const std::vector<mouse_event> events = g_mouse_input.take();
++					for (const mouse_event& e : events)
++					{
++						if (m_stop_input_loop) break;
++
++						s16 vx = 0, vy = 0;
++						if (g_mouse_input.to_virtual(e.x, e.y, get_virtual_width(), get_virtual_height(), vx, vy))
++						{
++							on_mouse_event(e, vx, vy);
++						}
++					}
++
++					if (!events.empty())
++					{
++						refresh();
++					}
++				}
++
+ 				// Get keyboard input if supported by the overlay and activated by the game.
+ 				// Ignored if a keyboard pad handler is active in order to prevent double input.
+ 				if (m_keyboard_input_enabled && !m_keyboard_pad_handler_active && input::g_keyboards_intercepted)
+diff --git a/rpcs3/Emu/RSX/Overlays/overlays.h b/rpcs3/Emu/RSX/Overlays/overlays.h
+index 897807081..7c860a602 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlays.h
++++ b/rpcs3/Emu/RSX/Overlays/overlays.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ #include "overlay_animation.h"
+ #include "overlay_controls.h"
++#include "overlay_mouse_input.h"
+ 
+ #include "Emu/Io/pad_types.h"
+ 
+@@ -107,6 +108,7 @@ namespace rsx
+ 			bool m_keyboard_input_enabled = false; // Allow keyboard input
+ 			bool m_keyboard_pad_handler_active = true; // Initialized as true to prevent keyboard input until proven otherwise.
+ 			bool m_allow_input_on_pause = false;
++			bool m_mouse_input_enabled = false; // GT6: consume rsx::overlays::g_mouse_input (see overlay_mouse_input.h)
+ 
+ 			static thread_local u32 g_thread_bit;
+ 
+@@ -145,6 +147,8 @@ namespace rsx
+ 			virtual void on_button_pressed(pad_button /*button_press*/, bool /*is_auto_repeat*/) {}
+ 			virtual void on_key_pressed(u32 /*led*/, u32 /*mkey*/, u32 /*key_code*/, u32 /*out_key_code*/, bool /*pressed*/, std::u32string /*key*/) {}
+ 			virtual void on_button_released(pad_button /*button_released*/) {}
++			// GT6: mouse event, position already mapped to overlay virtual coordinates
++			virtual void on_mouse_event(const mouse_event& /*event*/, s16 /*x*/, s16 /*y*/) {}
+ 
+ 			virtual void close(bool use_callback, bool stop_pad_interception);
+ 
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 9d283fb97..5751e5941 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -5,6 +5,8 @@
+ #include "vkutils/memory.h"
+ #include "Emu/RSX/Overlays/overlay_manager.h"
+ #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
++#include "Emu/RSX/Overlays/overlay_mouse_input.h"
++#include "Emu/RSX/gt6_engine_color.h"
+ #include "Emu/Cell/Modules/cellVideoOut.h"
+ 
+ #include "upscalers/bilinear_pass.hpp"
+@@ -668,6 +670,10 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 		aspect_ratio = { 0, 0, s32(m_swapchain_dims.width), s32(m_swapchain_dims.height) };
+ 	}
+ 
++	// GT6: overlay mouse mapping and live engine color correction
++	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
++	rsx::gt6::update_engine_color();
++
+ 	// Blit contents to screen..
+ 	VkImage target_image = m_swapchain->get_image(m_current_frame->present_image);
+ 	const auto present_layout = m_swapchain->get_optimal_present_layout();
+diff --git a/rpcs3/Emu/RSX/gt6_engine_color.h b/rpcs3/Emu/RSX/gt6_engine_color.h
+new file mode 100644
+index 000000000..e36f5ce25
+--- /dev/null
++++ b/rpcs3/Emu/RSX/gt6_engine_color.h
+@@ -0,0 +1,69 @@
++#pragma once
++
++// GT6: live control of the game's own color correction (EU 1.22 EMAIN).
++//
++// The launcher's "Engine Color Correct (experimental)" game patch hooks PDIScene::ColorCorrectRenderer's
++// constructor (0x8C2834) and applies modifiers read from 10 floats at 0x155F800 to the gain, bias, gamma
++// and chroma GT6 sets for the scene. While that hook is present, the emulator rewrites those floats every
++// frame from Video/Color Grading/Engine *, so the home menu sliders change the game's grading live.
++// Reverse-engineering notes: docs/re/gt6-color-pipeline.md in the GT6 launcher repository.
++
++#include "Emu/System.h"
++#include "Emu/system_config.h"
++#include "Emu/Memory/vm.h"
++
++#include <cmath>
++
++namespace rsx::gt6
++{
++	constexpr u32 engine_cc_hook = 0x008C2834;        // patched: b <code cave>   (stock: stfs f1,0x28(r3))
++	constexpr u32 engine_cc_hook_next = 0x008C2838;   // beq cr7, +0x70 in every build we support
++	constexpr u32 engine_cc_hook_next_word = 0x419E0070;
++	constexpr u32 engine_cc_data = 0x0155F800;        // gain rgb, bias rgb, gamma rgb, chroma
++
++	inline bool engine_color_hook_active()
++	{
++		if (Emu.GetTitleID() != "BCES01893")
++		{
++			return false;
++		}
++
++		if (!vm::check_addr(engine_cc_hook, vm::page_readable, 8) || !vm::check_addr(engine_cc_data, vm::page_readable, 40))
++		{
++			return false;
++		}
++
++		// A relative branch at the hook = the patch is applied
++		return (vm::read32(engine_cc_hook) >> 26) == 18 && vm::read32(engine_cc_hook_next) == engine_cc_hook_next_word;
++	}
++
++	// Slider (-100..100, 0 = neutral) -> modifier. Must match gt6launcher/engine_color.py.
++	inline f32 engine_gain(s64 v) { return 1.f + static_cast<f32>(v) / 100.f; }          // 0 .. 2, multiplies
++	inline f32 engine_bias(s64 v) { return static_cast<f32>(v) / 500.f; }                // -0.2 .. 0.2, adds
++	inline f32 engine_gamma(s64 v) { return std::exp2(-static_cast<f32>(v) / 100.f); }   // 2 .. 0.5, multiplies the exponent (+ = brighter)
++	inline f32 engine_chroma(s64 v) { return 1.f + static_cast<f32>(v) / 100.f; }        // 0 .. 2, multiplies
++
++	// Called once per presented frame
++	inline void update_engine_color()
++	{
++		if (!engine_color_hook_active())
++		{
++			return;
++		}
++
++		const auto& cg = g_cfg.video.color_grading;
++		const f32 values[10] =
++		{
++			engine_gain(cg.engine_gain_r.get()), engine_gain(cg.engine_gain_g.get()), engine_gain(cg.engine_gain_b.get()),
++			engine_bias(cg.engine_bias_r.get()), engine_bias(cg.engine_bias_g.get()), engine_bias(cg.engine_bias_b.get()),
++			engine_gamma(cg.engine_gamma_r.get()), engine_gamma(cg.engine_gamma_g.get()), engine_gamma(cg.engine_gamma_b.get()),
++			engine_chroma(cg.engine_chroma.get()),
++		};
++
++		auto* dst = vm::get_super_ptr<f32>(engine_cc_data);
++		for (u32 i = 0; i < 10; i++)
++		{
++			dst[i] = values[i];
++		}
++	}
++}
+diff --git a/rpcs3/Emu/localized_string_id.h b/rpcs3/Emu/localized_string_id.h
+index 4e1dd765d..8f7caf727 100644
+--- a/rpcs3/Emu/localized_string_id.h
++++ b/rpcs3/Emu/localized_string_id.h
+@@ -247,6 +247,16 @@ enum class localized_string_id
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_TEMPERATURE,
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_TINT,
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_DITHER,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_R,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_G,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_B,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_R,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_G,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_B,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_R,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_G,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_B,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_CHROMA,
+ 	HOME_MENU_SETTINGS_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED,
+diff --git a/rpcs3/Emu/system_config.h b/rpcs3/Emu/system_config.h
+index 216543d81..35e0b18ce 100644
+--- a/rpcs3/Emu/system_config.h
++++ b/rpcs3/Emu/system_config.h
+@@ -206,6 +206,18 @@ struct cfg_root : cfg::node
+ 			cfg::_int<-100, 100> tint{ this, "Tint", 0, true };
+ 			cfg::_bool dither{ this, "Dither", true, true };
+ 
++			// GT6's own color correction (needs the launcher's engine color game patch), see Emu/RSX/gt6_engine_color.h
++			cfg::_int<-100, 100> engine_gain_r{ this, "Engine Gain R", 0, true };
++			cfg::_int<-100, 100> engine_gain_g{ this, "Engine Gain G", 0, true };
++			cfg::_int<-100, 100> engine_gain_b{ this, "Engine Gain B", 0, true };
++			cfg::_int<-100, 100> engine_bias_r{ this, "Engine Bias R", 0, true };
++			cfg::_int<-100, 100> engine_bias_g{ this, "Engine Bias G", 0, true };
++			cfg::_int<-100, 100> engine_bias_b{ this, "Engine Bias B", 0, true };
++			cfg::_int<-100, 100> engine_gamma_r{ this, "Engine Gamma R", 0, true };
++			cfg::_int<-100, 100> engine_gamma_g{ this, "Engine Gamma G", 0, true };
++			cfg::_int<-100, 100> engine_gamma_b{ this, "Engine Gamma B", 0, true };
++			cfg::_int<-100, 100> engine_chroma{ this, "Engine Chroma", 0, true };
++
+ 		} color_grading{ this };
+ 
+ 		struct node_vk : cfg::node
+diff --git a/rpcs3/rpcs3qt/gs_frame.cpp b/rpcs3/rpcs3qt/gs_frame.cpp
+index c52c84b2f..2ef980d97 100644
+--- a/rpcs3/rpcs3qt/gs_frame.cpp
++++ b/rpcs3/rpcs3qt/gs_frame.cpp
+@@ -20,6 +20,7 @@
+ #include "Emu/RSX/Utils/image_utils.hpp"
+ #include "Emu/RSX/Utils/rsx_utils.h"
+ #include "Emu/RSX/Overlays/overlay_message.h"
++#include "Emu/RSX/Overlays/overlay_mouse_input.h"
+ #include "Emu/Io/interception.h"
+ #include "Emu/Io/recording_config.h"
+ #include "Input/pad_thread.h"
+@@ -618,6 +619,11 @@ void gs_frame::update_cursor()
+ 		// Show the mouse by default if this is not the active window
+ 		show_mouse = true;
+ 	}
++	else if (rsx::overlays::g_mouse_input.active)
++	{
++		// GT6: the home menu is open and clickable
++		show_mouse = true;
++	}
+ 	else if (m_hide_mouse_after_idletime && !m_mousehide_timer.isActive())
+ 	{
+ 		// Hide the mouse if the idle timeout was reached (which means that the timer isn't running)
+@@ -1142,8 +1148,9 @@ void gs_frame::update_title(double fps)
+ 
+ void gs_frame::mouseDoubleClickEvent(QMouseEvent* ev)
+ {
+-	if (m_disable_mouse)
++	if (m_disable_mouse || rsx::overlays::g_mouse_input.active)
+ 	{
++		// GT6: double clicks in the home menu are menu clicks, not fullscreen toggles
+ 		return;
+ 	}
+ 
+@@ -1203,8 +1210,83 @@ void gs_frame::mouse_hide_timeout()
+ 	}
+ }
+ 
++// GT6: forward mouse input to the home menu (see Emu/RSX/Overlays/overlay_mouse_input.h)
++static void forward_overlay_mouse_event(QEvent* ev, qreal dpr)
++{
++	using namespace rsx::overlays;
++
++	const auto to_button = [](Qt::MouseButton button) -> u8
++	{
++		switch (button)
++		{
++		case Qt::LeftButton: return mouse_left;
++		case Qt::RightButton: return mouse_right;
++		case Qt::MiddleButton: return mouse_middle;
++		case Qt::BackButton: return mouse_back;
++		default: return 0;
++		}
++	};
++
++	mouse_event e{};
++
++	switch (ev->type())
++	{
++	case QEvent::MouseMove:
++	case QEvent::MouseButtonPress:
++	case QEvent::MouseButtonDblClick:
++	case QEvent::MouseButtonRelease:
++	{
++		const auto* me = static_cast<QMouseEvent*>(ev);
++		e.kind = ev->type() == QEvent::MouseMove ? mouse_event::type::move
++			: ev->type() == QEvent::MouseButtonRelease ? mouse_event::type::release
++			: mouse_event::type::press;
++		e.button = to_button(me->button());
++		const QPointF pos = me->position() * dpr;
++		e.x = static_cast<s32>(pos.x());
++		e.y = static_cast<s32>(pos.y());
++		g_mouse_input.push(e);
++		break;
++	}
++	case QEvent::Wheel:
++	{
++		static int accumulated = 0;
++		const auto* we = static_cast<QWheelEvent*>(ev);
++		accumulated += we->angleDelta().y();
++		const int notches = accumulated / 120;
++		if (!notches) break;
++		accumulated -= notches * 120;
++		e.kind = mouse_event::type::wheel;
++		e.wheel = notches;
++		const QPointF pos = we->position() * dpr;
++		e.x = static_cast<s32>(pos.x());
++		e.y = static_cast<s32>(pos.y());
++		g_mouse_input.push(e);
++		break;
++	}
++	default:
++		break;
++	}
++}
++
+ bool gs_frame::event(QEvent* ev)
+ {
++	// GT6: F10 and Shift+F10 open the home menu, independent of the configurable shortcut
++	if (ev->type() == QEvent::KeyPress)
++	{
++		const auto* ke = static_cast<QKeyEvent*>(ev);
++		if (ke->key() == Qt::Key_F10 && !ke->isAutoRepeat() && !m_disable_kb_hotkeys && !Emu.IsStopped())
++		{
++			gui_log.notice("Game window: F10 -> home menu");
++			pad::g_home_menu_requested = true;
++			return true;
++		}
++	}
++
++	if (rsx::overlays::g_mouse_input.active)
++	{
++		forward_overlay_mouse_event(ev, devicePixelRatio());
++	}
++
+ 	if (ev->type() == QEvent::Close)
+ 	{
+ 		if (m_gui_settings->GetValue(gui::ib_confirm_exit).toBool())
+diff --git a/rpcs3/rpcs3qt/localized_emu.h b/rpcs3/rpcs3qt/localized_emu.h
+index 55a7bc279..0590c7c2f 100644
+--- a/rpcs3/rpcs3qt/localized_emu.h
++++ b/rpcs3/rpcs3qt/localized_emu.h
+@@ -268,6 +268,16 @@ private:
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TEMPERATURE: return tr("Temperature", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TINT: return tr("Tint (Green / Magenta)", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_DITHER: return tr("Dither (reduces banding)", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_R: return tr("GT6 Gain - Red", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_G: return tr("GT6 Gain - Green", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAIN_B: return tr("GT6 Gain - Blue", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_R: return tr("GT6 Bias - Red", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_G: return tr("GT6 Bias - Green", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_BIAS_B: return tr("GT6 Bias - Blue", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_R: return tr("GT6 Gamma - Red", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_G: return tr("GT6 Gamma - Green", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_B: return tr("GT6 Gamma - Blue", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_CHROMA: return tr("GT6 Chroma (saturation)", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT: return tr("Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT: return tr("Background Input Enabled", "Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED: return tr("Keep Pads Connected", "Input");

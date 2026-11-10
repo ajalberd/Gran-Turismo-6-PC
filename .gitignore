@@ -8,3 +8,6 @@ build-win/
 *.iso
 *.pkg
 *.PUP
+emulator/rpcs3-src/
+emulator/rpcs3-ci/
+re-local/

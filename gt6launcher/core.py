@@ -17,7 +17,7 @@ from .formats import GameImage, identify_folder, identify_iso
 from .profile import Settings, build_custom_config, desired_patches
 from .rpcs3 import RPCS3, find_rpcs3, installed_version, seed_gui_settings
 from .updates import DEFAULT_TARGET, install_chain, Downloader
-from .yamlio import atomic_write, dump_cfg
+from .yamlio import atomic_write, dump_cfg, load_cfg
 
 GT6_TITLES = {
     "BCES01893": "Europe", "BCES01977": "UK", "BCUS98296": "North America", "BCUS99247": "Latin America",
@@ -255,6 +255,8 @@ class Core:
         cfg_dir = paths.rpcs3_config_dir()
         self.log(f"RPCS3 config directory: {cfg_dir}")
         seed_gui_settings(cfg_dir)
+        if self.sync_ingame_color_grading(tid):
+            self.log("color grading: using the values saved in the in-game home menu")
         eff = self.effective_settings(tid, ver)
         # global config: make sure the LAN-relevant parts agree with the custom config
         lan.apply_global_network(eff.lan_enabled or eff.online_enabled, eff.lan_bind_address)
@@ -262,6 +264,9 @@ class Core:
         # The launcher owns this file: write it fresh (a merge would keep stale keys such as
         # Process ARGV "lanmode" or a previously chosen GPU adapter after they were switched off).
         atomic_write(paths.custom_config_file(tid), dump_cfg(custom))
+        self.data.setdefault("cg_written", {})[tid] = profile_mod.color_grading_from_config(
+            custom["Video"]["Color Grading"])
+        self.save()
         # patches
         for msg in patches.ensure_sources():  # first start: fetch the patch databases
             self.log(msg)
@@ -277,6 +282,30 @@ class Core:
         patches.write_patch_config(paths.rpcs3_settings_dir(cfg_dir), selection)
         self.log(f"config written for {tid} {ver}: {len(selection)} patches")
         return [p.name for p, _ in selection]
+
+    def sync_ingame_color_grading(self, tid: str) -> bool:
+        """Adopt color grading saved from the in-game home menu (Settings -> Color, Save).
+
+        RPCS3 saves it into the per-game config, which the launcher regenerates on every start.
+        Values that differ from what the launcher last wrote there were changed in game and win;
+        returns True when settings changed."""
+        written = self.data.get("cg_written", {}).get(tid)
+        if written is None:
+            return False
+        try:
+            cfg = load_cfg(paths.custom_config_file(tid))
+        except Exception:  # noqa: BLE001 - a broken file is simply rewritten
+            return False
+        found = profile_mod.color_grading_from_config((cfg.get("Video") or {}).get("Color Grading"))
+        if not found or found == written:
+            return False
+        # only the values changed in game: a slider moved in the launcher since then keeps its value
+        changed = {k: v for k, v in found.items() if written.get(k) != v and getattr(self.settings, k) != v}
+        for k, v in changed.items():
+            setattr(self.settings, k, v)
+        self.data["cg_written"][tid] = found
+        self.save()
+        return bool(changed)
 
     # ------------------------------------------------------------------ compile-cache tracking
     COMPILE_NOTICE = ("First start of a game version compiles GT6's code for your PC. This can take several "

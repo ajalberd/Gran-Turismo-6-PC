@@ -521,6 +521,8 @@ class MainWindow(QMainWindow):
         f.addRow("", self.gfx_hint)
         v.addWidget(g)
 
+        v.addWidget(self._build_color_grading())
+
         g = QGroupBox("Frame rate && display")
         f = QFormLayout(g)
         self.ctl["frame_mode"] = self._combo(profile.FRAME_MODES, "frame_mode")
@@ -580,6 +582,86 @@ class MainWindow(QMainWindow):
         return w
 
     # ------------------------------------------------------------------ patches tab
+    CG_LABELS = {
+        "cg_brightness": ("Brightness", "Flat offset: lifts or lowers the whole image."),
+        "cg_contrast": ("Contrast", "Stretches the image around mid-grey."),
+        "cg_gamma": ("Gamma (midtones)", "Positive brightens midtones without touching black and white."),
+        "cg_shadows": ("Shadows", "Raises (positive) or crushes (negative) the black level."),
+        "cg_highlights": ("Highlights", "Scales the bright end of the image."),
+        "cg_saturation": ("Saturation", "-100 = black and white, +100 = twice as colourful."),
+        "cg_vibrance": ("Vibrance", "Boosts muted colours more than already strong ones (skin, sky)."),
+        "cg_temperature": ("Temperature", "Negative = cooler / bluer, positive = warmer / more orange."),
+        "cg_tint": ("Tint", "Negative = greener, positive = more magenta."),
+        "cge_gain_r": ("GT6 gain - red", "Scales the red GT6's own color correction outputs (per track look kept)."),
+        "cge_gain_g": ("GT6 gain - green", "Scales GT6's own green output."),
+        "cge_gain_b": ("GT6 gain - blue", "Scales GT6's own blue output."),
+        "cge_bias_r": ("GT6 bias - red", "Adds to / subtracts from red after GT6's gain."),
+        "cge_bias_g": ("GT6 bias - green", "Adds to / subtracts from green after GT6's gain."),
+        "cge_bias_b": ("GT6 bias - blue", "Adds to / subtracts from blue after GT6's gain."),
+        "cge_gamma_r": ("GT6 gamma - red", "Positive brightens red midtones in GT6's own gamma stage."),
+        "cge_gamma_g": ("GT6 gamma - green", "Positive brightens green midtones."),
+        "cge_gamma_b": ("GT6 gamma - blue", "Positive brightens blue midtones."),
+        "cge_chroma": ("GT6 chroma", "GT6's own saturation: -100 = black and white, +100 = double."),
+    }
+
+    def _grading_slider(self, f: QFormLayout, key: str) -> None:
+        text, tip = self.CG_LABELS[key]
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setRange(-100, 100)
+        sl.setSingleStep(1)
+        sl.setPageStep(10)
+        sl.setToolTip(tip + "  Click the number to reset it.")
+        val = QPushButton("0")
+        val.setFlat(True)
+        val.setFixedWidth(44)
+        val.setToolTip("Reset to 0")
+        sl.valueChanged.connect(lambda n, b=val: b.setText(f"{n:+d}" if n else "0"))
+        sl.valueChanged.connect(lambda n, k=key: self._set(k, n))
+        val.clicked.connect(lambda _c=False, s=sl: s.setValue(0))
+        h.addWidget(sl, 1)
+        h.addWidget(val)
+        self.ctl[key] = sl
+        f.addRow(text, row)
+
+    def _build_color_grading(self) -> QGroupBox:
+        g = QGroupBox("Color grading")
+        f = QFormLayout(g)
+        self.ctl["color_grading"] = self._check(
+            "Enable color grading", "color_grading",
+            "Applied by the GT6-patched emulator to the final image, after upscaling. "
+            "The emulator's own menus and overlays are not affected.")
+        f.addRow("", self.ctl["color_grading"])
+        for key in profile.COLOR_GRADING:
+            self._grading_slider(f, key)
+        self.ctl["cg_dither"] = self._check(
+            "Dither (hides colour banding from strong adjustments)", "cg_dither")
+        f.addRow("", self.ctl["cg_dither"])
+        f.addRow("", label("GT6's own color correction (EU 1.22, experimental): adjusts the grade GT6 applies per "
+                           "track instead of the final image. Turns on the 'Engine Color Correct' game patch.",
+                           9, name="muted"))
+        self.ctl["engine_color"] = self._check("Adjust GT6's own color correction", "engine_color",
+                                               "Only has an effect in scenes where GT6 uses its color correction.")
+        f.addRow("", self.ctl["engine_color"])
+        for key in profile.ENGINE_COLOR:
+            self._grading_slider(f, key)
+        b = QPushButton("Reset color grading")
+        b.clicked.connect(self.reset_color_grading)
+        f.addRow("", b)
+        f.addRow("", label("Also adjustable live while you play: open the home menu (Xbox / PS button or F10) -> "
+                           "Settings -> Color (the mouse works there too). Press Save to keep the values; the "
+                           "launcher picks them up after the game closes. The final-image grading and the live "
+                           "sliders need the GT6-patched emulator (patches 09 and 10); GT6's own color correction "
+                           "also works with older builds, set from here.", 9, name="muted"))
+        return g
+
+    def reset_color_grading(self) -> None:
+        for key in profile.GRADING_SLIDERS:
+            self.ctl[key].setValue(0)
+        self.ctl["cg_dither"].setChecked(True)
+
     def _build_patches(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
@@ -788,7 +870,7 @@ class MainWindow(QMainWindow):
             self._loading = False
         self._update_hints()
         if key in ("aa", "aspect", "motion_blur", "depth_of_field", "shadows", "lamp_glare", "unlock_menu_fps",
-                   "resolution_scale", "lan_enabled", "online_enabled", "dev_menu") or key.startswith("fov_"):
+                   "resolution_scale", "lan_enabled", "online_enabled", "dev_menu", "engine_color")                 or key.startswith(("fov_", "cge_")):
             self._fill_patch_list()
 
     def _save_soon(self) -> None:
@@ -1413,6 +1495,12 @@ class MainWindow(QMainWindow):
             self._append_log(f"game exited (code {self.proc.returncode})")
             if __import__("time").time() - getattr(self, "_proc_started", 0) > 180:
                 self.core.mark_compiled(self._proc_entry)
+            try:
+                if self.core.sync_ingame_color_grading(self._proc_entry.title_id):
+                    self._append_log("color grading: picked up the values saved in the in-game home menu")
+                    self._load_settings_into_ui()
+            except Exception:  # noqa: BLE001
+                self._append_log(traceback.format_exc())
             self.proc = None
             self.refresh()
 

@@ -1,0 +1,557 @@
+diff --git a/rpcs3/Emu/RSX/GL/GLOverlays.cpp b/rpcs3/Emu/RSX/GL/GLOverlays.cpp
+index ed3614510..3b0da1ec8 100644
+--- a/rpcs3/Emu/RSX/GL/GLOverlays.cpp
++++ b/rpcs3/Emu/RSX/GL/GLOverlays.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "Utilities/StrUtil.h"
+ #include "Utilities/stereo_config.h"
++#include "../color_grading.h"
+ #include "../Program/RSXOverlay.h"
+ #include "Emu/Cell/timers.hpp"
+ 
+@@ -524,12 +525,30 @@ namespace gl
+ 		stereo_cfg.update_from_config(stereo_enabled);
+ 		const auto& matrices = stereo_cfg.matrices();
+ 
++		// GT6 color grading: packed the same way as the Vulkan push constants, then unpacked into plain uniforms
++		color4f left[3], right[3], extra{};
++		for (int i = 0; i < 3; ++i)
++		{
++			left[i] = { matrices.left[i].r, matrices.left[i].g, matrices.left[i].b, 0.f };
++			right[i] = { matrices.right[i].r, matrices.right[i].g, matrices.right[i].b, 0.f };
++		}
++		const int grade_flags = rsx::pack_color_grading(rsx::get_color_grading_params(), stereo_cfg.stereo_mode(), left, right, extra);
++
++		mat3f left_matrix, right_matrix;
++		for (int i = 0; i < 3; ++i)
++		{
++			left_matrix[i] = { left[i].r, left[i].g, left[i].b };
++			right_matrix[i] = { right[i].r, right[i].g, right[i].b };
++		}
++
+ 		program_handle.uniforms["gamma"] = gamma;
+-		program_handle.uniforms["limit_range"] = limited_rgb + 0;
++		program_handle.uniforms["limit_range"] = (limited_rgb ? static_cast<int>(rsx::video_out_limited_range) : 0) | grade_flags;
+ 		program_handle.uniforms["stereo_display_mode"] = static_cast<u8>(stereo_cfg.stereo_mode());
+ 		program_handle.uniforms["stereo_image_count"] = (source[1] == GL_NONE ? 1 : 2);
+-		program_handle.uniforms["left_anaglyph_matrix"] = matrices.left;
+-		program_handle.uniforms["right_anaglyph_matrix"] = matrices.right;
++		program_handle.uniforms["left_anaglyph_matrix"] = left_matrix;
++		program_handle.uniforms["right_anaglyph_matrix"] = right_matrix;
++		program_handle.uniforms["grade_offset"] = color3f(left[0].a, left[1].a, left[2].a);
++		program_handle.uniforms["grade_params"] = color4f(right[0].a, right[1].a, right[2].a, extra.r);
+ 
+ 		saved_sampler_state saved(GL_TEMP_IMAGE_SLOT(0), m_sampler);
+ 		cmd->bind_texture(GL_TEMP_IMAGE_SLOT(0), GL_TEXTURE_2D, source[0]);
+diff --git a/rpcs3/Emu/RSX/GL/GLPresent.cpp b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+index f6aac5a22..bf7e98476 100644
+--- a/rpcs3/Emu/RSX/GL/GLPresent.cpp
++++ b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+@@ -435,7 +435,9 @@ bool GLGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 			}
+ 		}
+ 
+-		if (!backbuffer_has_alpha && use_full_rgb_range_output && rsx::fcmp(avconfig.gamma, 1.f) && !avconfig.stereo_enabled)
++		const bool use_color_grading = g_cfg.video.color_grading.enabled.get();
++
++		if (!backbuffer_has_alpha && use_full_rgb_range_output && rsx::fcmp(avconfig.gamma, 1.f) && !avconfig.stereo_enabled && !use_color_grading)
+ 		{
+ 			// Blit source image to the screen
+ 			m_upscaler->scale_output(cmd, image_to_flip, screen_area, aspect_ratio.flipped_vertical(), UPSCALE_AND_COMMIT | UPSCALE_DEFAULT_VIEW);
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+index a9ff8183c..3d8260641 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+@@ -15,6 +15,7 @@ namespace rsx
+ 
+ 			add_page(home_menu::fa_icon::audio, std::make_shared<home_menu_settings_audio>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::video, std::make_shared<home_menu_settings_video>(x, y, width, height, use_separators, nullptr));
++			add_page(home_menu::fa_icon::settings_sliders, std::make_shared<home_menu_settings_color>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::gamepad, std::make_shared<home_menu_settings_input>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::settings, std::make_shared<home_menu_settings_advanced>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::settings_sliders, std::make_shared<home_menu_settings_overlays>(x, y, width, height, use_separators, nullptr));
+@@ -175,6 +176,26 @@ namespace rsx
+ 			apply_layout();
+ 		}
+ 
++		home_menu_settings_color::home_menu_settings_color(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
++			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING))
++		{
++			// Applied live by the video-out pass (Emu/RSX/color_grading.h). Select resets a slider to neutral.
++			auto& cg = g_cfg.video.color_grading;
++			add_checkbox(&cg.enabled, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENABLED);
++			add_signed_slider(&cg.brightness, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_BRIGHTNESS, "", 5);
++			add_signed_slider(&cg.contrast, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_CONTRAST, "", 5);
++			add_signed_slider(&cg.gamma, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_GAMMA, "", 5);
++			add_signed_slider(&cg.shadows, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_SHADOWS, "", 5);
++			add_signed_slider(&cg.highlights, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_HIGHLIGHTS, "", 5);
++			add_signed_slider(&cg.saturation, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_SATURATION, "", 5);
++			add_signed_slider(&cg.vibrance, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_VIBRANCE, "", 5);
++			add_signed_slider(&cg.temperature, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TEMPERATURE, "", 5);
++			add_signed_slider(&cg.tint, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TINT, "", 5);
++			add_checkbox(&cg.dither, localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_DITHER);
++
++			apply_layout();
++		}
++
+ 		home_menu_settings_advanced::home_menu_settings_advanced(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
+ 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_ADVANCED))
+ 		{
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+index 74ae147fc..6d5287bff 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+@@ -324,6 +324,11 @@ namespace rsx
+ 			home_menu_settings_video(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+ 		};
+ 
++		struct home_menu_settings_color : public home_menu_settings_page
++		{
++			home_menu_settings_color(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
++		};
++
+ 		struct home_menu_settings_advanced : public home_menu_settings_page
+ 		{
+ 			home_menu_settings_advanced(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+diff --git a/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl b/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
+index 8ebc8ae78..441eb6f4a 100644
+--- a/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
++++ b/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
+@@ -31,16 +31,28 @@ const vec2 sbs_multi_matrix    = vec2(2.0, 1.0);
+ const vec2 ou_single_matrix    = vec2(1.0, 0.9796f);
+ const vec2 ou_multi_matrix     = vec2(1.0, 2.0);
+ 
++// limit_range bits
++#define FLAG_LIMITED_RANGE 1
++#define FLAG_COLOR_GRADE 2
++#define FLAG_DITHER 4
++
+ #ifdef VULKAN
++// Same std430 layout as two mat3 (each column padded to a vec4). The padding lanes and the
++// trailing vec4 carry the color grading parameters (128 bytes = guaranteed push constant size).
+ layout(push_constant) uniform static_data
+ {
+ 	float gamma;
+ 	int limit_range;
+ 	int stereo_display_mode;
+ 	int stereo_image_count;
+-	mat3 left_anaglyph_matrix;
+-	mat3 right_anaglyph_matrix;
++	vec4 left_anaglyph_cols[3];
++	vec4 right_anaglyph_cols[3];
++	vec4 grade_extra;
+ };
++#define left_anaglyph_matrix mat3(left_anaglyph_cols[0].xyz, left_anaglyph_cols[1].xyz, left_anaglyph_cols[2].xyz)
++#define right_anaglyph_matrix mat3(right_anaglyph_cols[0].xyz, right_anaglyph_cols[1].xyz, right_anaglyph_cols[2].xyz)
++#define grade_offset vec3(left_anaglyph_cols[0].w, left_anaglyph_cols[1].w, left_anaglyph_cols[2].w)
++#define grade_params vec4(right_anaglyph_cols[0].w, right_anaglyph_cols[1].w, right_anaglyph_cols[2].w, grade_extra.x)
+ #else
+ uniform float gamma;
+ uniform int limit_range;
+@@ -48,6 +60,8 @@ uniform int stereo_display_mode;
+ uniform int stereo_image_count;
+ uniform mat3 left_anaglyph_matrix;
+ uniform mat3 right_anaglyph_matrix;
++uniform vec3 grade_offset;
++uniform vec4 grade_params; // power, contrast, saturation, vibrance
+ #endif
+ 
+ vec3 applyMatrix(vec3 left, vec3 right)
+@@ -147,11 +161,63 @@ vec4 read_source()
+ 	return vec4(1., 0., 0., 1.);
+ }
+ 
++bool is_anaglyph_mode()
++{
++	return stereo_display_mode >= STEREO_MODE_ANAGLYPH_RED_GREEN && stereo_display_mode <= STEREO_MODE_ANAGLYPH_CUSTOM;
++}
++
++// GT6 color grading, parameters built by rsx::get_color_grading_params() (Emu/RSX/color_grading.h)
++vec3 color_grade(vec3 color)
++{
++	const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
++	const float power = grade_params.x;
++	const float contrast = grade_params.y;
++	const float saturation = grade_params.z;
++	const float vibrance = grade_params.w;
++
++	// White balance, shadows, highlights, brightness (M is pre-folded into the anaglyph matrices in 3D)
++	if (!is_anaglyph_mode())
++	{
++		color = left_anaglyph_matrix * color;
++	}
++	color = max(color + grade_offset, vec3(0.));
++
++	color = pow(color, vec3(power));
++	color = (color - 0.5) * contrast + 0.5;
++
++	float luma = dot(clamp(color, 0., 1.), luma_weights);
++	color = mix(vec3(luma), color, saturation);
++
++	// Vibrance: scale saturation by how unsaturated the pixel already is
++	const float chroma = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
++	luma = dot(color, luma_weights);
++	color = mix(vec3(luma), color, 1. + vibrance * (1. - clamp(chroma, 0., 1.)));
++
++	color = clamp(color, 0., 1.);
++
++	if ((limit_range & FLAG_DITHER) != 0)
++	{
++		// Triangular noise, +-1 LSB of an 8-bit output
++		const vec2 p = gl_FragCoord.xy;
++		const float n0 = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
++		const float n1 = fract(sin(dot(p, vec2(39.3468, 11.1351))) * 24634.6345);
++		color = clamp(color + (n0 + n1 - 1.) / 255., 0., 1.);
++	}
++
++	return color;
++}
++
+ void main()
+ {
+ 	vec4 color = read_source();
+ 	color.rgb = pow(color.rgb, vec3(gamma));
+-	ocol = (limit_range == FALSE)
++
++	if ((limit_range & FLAG_COLOR_GRADE) != 0)
++	{
++		color.rgb = color_grade(color.rgb);
++	}
++
++	ocol = ((limit_range & FLAG_LIMITED_RANGE) == 0)
+ 		? color
+ 		: ((color * 220.) + 16.) / 255.;
+ 	ocol.a = 1.f;
+diff --git a/rpcs3/Emu/RSX/VK/VKOverlays.cpp b/rpcs3/Emu/RSX/VK/VKOverlays.cpp
+index 2a0054994..fc695813f 100644
+--- a/rpcs3/Emu/RSX/VK/VKOverlays.cpp
++++ b/rpcs3/Emu/RSX/VK/VKOverlays.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "util/fnv_hash.hpp"
+ #include "Utilities/stereo_config.h"
++#include "../color_grading.h"
+ 
+ #include "Emu/Cell/timers.hpp"
+ 
+@@ -934,7 +935,7 @@ namespace vk
+ 		const auto& matrices = stereo_cfg.matrices();
+ 
+ 		config.gamma = gamma;
+-		config.limit_range = limited_rgb ? 1 : 0;
++		config.limit_range = limited_rgb ? rsx::video_out_limited_range : 0;
+ 		config.stereo_display_mode = static_cast<u8>(stereo_cfg.stereo_mode());
+ 		config.stereo_image_count = std::min(::size32(src), 2u);
+ 
+@@ -942,8 +943,14 @@ namespace vk
+ 		{
+ 			std::memcpy(config.left_anaglyph_matrix[i].rgba, matrices.left[i].rgb, sizeof(matrices.left[i].rgb));
+ 			std::memcpy(config.right_anaglyph_matrix[i].rgba, matrices.right[i].rgb, sizeof(matrices.right[i].rgb));
++			config.left_anaglyph_matrix[i].a = 0.f;
++			config.right_anaglyph_matrix[i].a = 0.f;
+ 		}
+ 
++		config.grade_extra = {};
++		config.limit_range |= rsx::pack_color_grading(rsx::get_color_grading_params(), stereo_cfg.stereo_mode(),
++			config.left_anaglyph_matrix, config.right_anaglyph_matrix, config.grade_extra);
++
+ 		std::vector<vk::image_view*> views;
+ 		views.reserve(2);
+ 
+diff --git a/rpcs3/Emu/RSX/VK/VKOverlays.h b/rpcs3/Emu/RSX/VK/VKOverlays.h
+index e354d237f..c953e98d2 100644
+--- a/rpcs3/Emu/RSX/VK/VKOverlays.h
++++ b/rpcs3/Emu/RSX/VK/VKOverlays.h
+@@ -217,6 +217,7 @@ namespace vk
+ 				int   stereo_image_count;
+ 				color4_base<float> left_anaglyph_matrix[3];
+ 				color4_base<float> right_anaglyph_matrix[3];
++				color4_base<float> grade_extra; // GT6 color grading, see Emu/RSX/color_grading.h
+ 			};
+ 
+ 			float data[(
+@@ -225,12 +226,14 @@ namespace vk
+ 				sizeof(stereo_display_mode) +
+ 				sizeof(stereo_image_count) +
+ 				sizeof(left_anaglyph_matrix) +
+-				sizeof(right_anaglyph_matrix)
++				sizeof(right_anaglyph_matrix) +
++				sizeof(grade_extra)
+ 				) / sizeof(float)];
+ 		}
+ 		config = {};
+ 
+-		static constexpr u32 fragment_push_constants_size = 112;
++		// 128 = minimum maxPushConstantsSize guaranteed by Vulkan
++		static constexpr u32 fragment_push_constants_size = 128;
+ 
+ 		video_out_calibration_pass();
+ 
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 4afff8452..9d283fb97 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -847,7 +847,9 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	{
+ 		const bool use_full_rgb_range_output = g_cfg.video.full_rgb_range_output.get();
+ 
+-		if (!use_full_rgb_range_output || !rsx::fcmp(avconfig.gamma, 1.f) || avconfig.stereo_enabled) [[unlikely]]
++		const bool use_color_grading = g_cfg.video.color_grading.enabled.get();
++
++		if (!use_full_rgb_range_output || !rsx::fcmp(avconfig.gamma, 1.f) || avconfig.stereo_enabled || use_color_grading) [[unlikely]]
+ 		{
+ 			if (image_to_flip) calibration_src.push_back(image_to_flip);
+ 			if (image_to_flip2) calibration_src.push_back(image_to_flip2);
+diff --git a/rpcs3/Emu/RSX/color_grading.h b/rpcs3/Emu/RSX/color_grading.h
+new file mode 100644
+index 000000000..c351bb827
+--- /dev/null
++++ b/rpcs3/Emu/RSX/color_grading.h
+@@ -0,0 +1,169 @@
++#pragma once
++
++// GT6: user color grading for the video-out (calibration) pass.
++//
++// Works on the final display-encoded image (after upscaling, before RPCS3's own overlays):
++//   1. linear stage   c = M * c + offset       white balance, shadows (lift), highlights (gain), brightness
++//   2. gamma          c = pow(c, power)
++//   3. contrast       c = (c - 0.5) * contrast + 0.5
++//   4. saturation     mix(luma, c, saturation), then vibrance (boosts muted colors more than saturated ones)
++//   5. clamp, optional +-0.5 LSB triangular dither (hides 8-bit banding from the curve)
++//
++// The shader receives these packed into the spare lanes of the calibration pass push constants, see
++// VideoOutCalibrationPass.glsl. M is a full 3x3 matrix so it can be folded into the anaglyph matrices.
++
++#include "Utilities/geometry.h"
++#include "Emu/system_config.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace rsx
++{
++	// Bits of the calibration pass "limit_range" int
++	enum video_out_flags : int
++	{
++		video_out_limited_range = 1,
++		video_out_color_grade = 2,
++		video_out_dither = 4,
++	};
++
++	struct color_grading_params
++	{
++		bool enabled = false;
++		bool dither = false;
++		mat3f matrix{};          // column-major, matrix[i] = column i
++		f32 offset[3]{};
++		f32 power = 1.f;
++		f32 contrast = 1.f;
++		f32 saturation = 1.f;
++		f32 vibrance = 0.f;
++
++		// Column-major 3x3 product: out = matrix * in
++		void multiply_into(mat3f& in_out) const
++		{
++			mat3f tmp{};
++			for (int c = 0; c < 3; ++c)
++			{
++				for (int r = 0; r < 3; ++r)
++				{
++					tmp[c].rgb[r] =
++						matrix[0].rgb[r] * in_out[c].rgb[0] +
++						matrix[1].rgb[r] * in_out[c].rgb[1] +
++						matrix[2].rgb[r] * in_out[c].rgb[2];
++				}
++			}
++			for (int c = 0; c < 3; ++c) in_out[c] = tmp[c];
++		}
++	};
++
++	inline color_grading_params get_color_grading_params()
++	{
++		color_grading_params p{};
++		const auto& cfg = g_cfg.video.color_grading;
++		p.enabled = cfg.enabled.get();
++
++		if (!p.enabled)
++		{
++			return p;
++		}
++
++		const auto norm = [](s64 v) { return std::clamp(static_cast<f32>(v) / 100.f, -1.f, 1.f); };
++
++		const f32 temperature = norm(cfg.temperature.get());
++		const f32 tint = norm(cfg.tint.get());
++		const f32 lift = norm(cfg.shadows.get()) * 0.2f;            // +-0.2 at the black point
++		const f32 gain = 1.f + norm(cfg.highlights.get()) * 0.5f;   // 0.5 .. 1.5 at the white point
++		const f32 brightness = norm(cfg.brightness.get()) * 0.2f;   // +-0.2 flat offset
++
++		// White balance: warm = more red / less blue, tint + = magenta (less green).
++		// Normalised to keep Rec.709 luma of white unchanged so it does not change brightness.
++		f32 wb[3] = { 1.f + 0.25f * temperature, 1.f - 0.20f * tint, 1.f - 0.25f * temperature };
++		const f32 luma = 0.2126f * wb[0] + 0.7152f * wb[1] + 0.0722f * wb[2];
++		for (f32& w : wb) w /= luma;
++
++		// c' = gain * ((1 - lift) * WB * c + lift) + brightness
++		for (int i = 0; i < 3; ++i)
++		{
++			p.matrix[i] = {};
++			p.matrix[i].rgb[i] = gain * (1.f - lift) * wb[i];
++			p.offset[i] = gain * lift + brightness;
++		}
++
++		// + brightens midtones (like raising a gamma slider in a TV menu): 0.5x .. 2x
++		p.power = std::exp2(-norm(cfg.gamma.get()));
++		p.contrast = std::exp2(norm(cfg.contrast.get()));
++		p.saturation = 1.f + norm(cfg.saturation.get());
++		p.vibrance = norm(cfg.vibrance.get());
++		p.dither = cfg.dither.get();
++		return p;
++	}
++
++	inline bool is_anaglyph_mode(stereo_render_mode_options mode)
++	{
++		switch (mode)
++		{
++		case stereo_render_mode_options::anaglyph_red_green:
++		case stereo_render_mode_options::anaglyph_red_blue:
++		case stereo_render_mode_options::anaglyph_red_cyan:
++		case stereo_render_mode_options::anaglyph_magenta_cyan:
++		case stereo_render_mode_options::anaglyph_trioscopic:
++		case stereo_render_mode_options::anaglyph_amber_blue:
++		case stereo_render_mode_options::anaglyph_custom:
++			return true;
++		default:
++			return false;
++		}
++	}
++
++	// Packs grading into the calibration pass inputs.
++	// left/right: anaglyph matrices (columns, xyz used, w = spare lane), extra: one more spare vec4.
++	// Returns the flag bits to OR into "limit_range".
++	template <typename Vec4>
++	int pack_color_grading(const color_grading_params& p, stereo_render_mode_options stereo_mode, Vec4* left, Vec4* right, Vec4& extra)
++	{
++		if (!p.enabled)
++		{
++			return 0;
++		}
++
++		if (is_anaglyph_mode(stereo_mode))
++		{
++			// The shader already multiplies by the anaglyph matrices: fold M into them
++			mat3f l, r;
++			for (int i = 0; i < 3; ++i)
++			{
++				l[i] = { left[i].x, left[i].y, left[i].z };
++				r[i] = { right[i].x, right[i].y, right[i].z };
++			}
++			p.multiply_into(l);
++			p.multiply_into(r);
++			for (int i = 0; i < 3; ++i)
++			{
++				left[i].x = l[i].r; left[i].y = l[i].g; left[i].z = l[i].b;
++				right[i].x = r[i].r; right[i].y = r[i].g; right[i].z = r[i].b;
++			}
++		}
++		else
++		{
++			// Left matrix is unused outside the anaglyph modes: it carries M
++			for (int i = 0; i < 3; ++i)
++			{
++				left[i].x = p.matrix[i].r; left[i].y = p.matrix[i].g; left[i].z = p.matrix[i].b;
++			}
++		}
++
++		left[0].w = p.offset[0];
++		left[1].w = p.offset[1];
++		left[2].w = p.offset[2];
++		right[0].w = p.power;
++		right[1].w = p.contrast;
++		right[2].w = p.saturation;
++		extra.x = p.vibrance;
++		extra.y = 0.f;
++		extra.z = 0.f;
++		extra.w = 0.f;
++
++		return video_out_color_grade | (p.dither ? video_out_dither : 0);
++	}
++}
+diff --git a/rpcs3/Emu/localized_string_id.h b/rpcs3/Emu/localized_string_id.h
+index 393c8f00e..4e1dd765d 100644
+--- a/rpcs3/Emu/localized_string_id.h
++++ b/rpcs3/Emu/localized_string_id.h
+@@ -235,6 +235,18 @@ enum class localized_string_id
+ 	HOME_MENU_SETTINGS_VIDEO_RESOLUTION_SCALE_THRESHOLD,
+ 	HOME_MENU_SETTINGS_VIDEO_STRETCH_TO_DISPLAY,
+ 	HOME_MENU_SETTINGS_VIDEO_STEREO_MODE,
++	HOME_MENU_SETTINGS_COLOR_GRADING,
++	HOME_MENU_SETTINGS_COLOR_GRADING_ENABLED,
++	HOME_MENU_SETTINGS_COLOR_GRADING_BRIGHTNESS,
++	HOME_MENU_SETTINGS_COLOR_GRADING_CONTRAST,
++	HOME_MENU_SETTINGS_COLOR_GRADING_GAMMA,
++	HOME_MENU_SETTINGS_COLOR_GRADING_SHADOWS,
++	HOME_MENU_SETTINGS_COLOR_GRADING_HIGHLIGHTS,
++	HOME_MENU_SETTINGS_COLOR_GRADING_SATURATION,
++	HOME_MENU_SETTINGS_COLOR_GRADING_VIBRANCE,
++	HOME_MENU_SETTINGS_COLOR_GRADING_TEMPERATURE,
++	HOME_MENU_SETTINGS_COLOR_GRADING_TINT,
++	HOME_MENU_SETTINGS_COLOR_GRADING_DITHER,
+ 	HOME_MENU_SETTINGS_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED,
+diff --git a/rpcs3/Emu/system_config.h b/rpcs3/Emu/system_config.h
+index a60a5d33e..216543d81 100644
+--- a/rpcs3/Emu/system_config.h
++++ b/rpcs3/Emu/system_config.h
+@@ -188,6 +188,26 @@ struct cfg_root : cfg::node
+ 		cfg::uint<0, 100> rcas_sharpening_intensity{ this, "FidelityFX CAS Sharpening Intensity", 50, true };
+ 		cfg::_bool disable_blit_engine_upscaling{ this, "Disable Blit Engine Upscaling", false, true };
+ 
++		// GT6: color grading applied in the video-out pass (after upscaling, before RPCS3's own overlays).
++		// All sliders are -100..100 with 0 = neutral; see Emu/RSX/color_grading.h for the math.
++		struct node_color_grading : cfg::node
++		{
++			node_color_grading(cfg::node* _this) : cfg::node(_this, "Color Grading") {}
++
++			cfg::_bool enabled{ this, "Enabled", false, true };
++			cfg::_int<-100, 100> brightness{ this, "Brightness", 0, true };
++			cfg::_int<-100, 100> contrast{ this, "Contrast", 0, true };
++			cfg::_int<-100, 100> gamma{ this, "Gamma", 0, true };
++			cfg::_int<-100, 100> shadows{ this, "Shadows", 0, true };
++			cfg::_int<-100, 100> highlights{ this, "Highlights", 0, true };
++			cfg::_int<-100, 100> saturation{ this, "Saturation", 0, true };
++			cfg::_int<-100, 100> vibrance{ this, "Vibrance", 0, true };
++			cfg::_int<-100, 100> temperature{ this, "Temperature", 0, true };
++			cfg::_int<-100, 100> tint{ this, "Tint", 0, true };
++			cfg::_bool dither{ this, "Dither", true, true };
++
++		} color_grading{ this };
++
+ 		struct node_vk : cfg::node
+ 		{
+ 			node_vk(cfg::node* _this) : cfg::node(_this, "Vulkan") {}
+diff --git a/rpcs3/rpcs3qt/localized_emu.h b/rpcs3/rpcs3qt/localized_emu.h
+index c488de71c..55a7bc279 100644
+--- a/rpcs3/rpcs3qt/localized_emu.h
++++ b/rpcs3/rpcs3qt/localized_emu.h
+@@ -256,6 +256,18 @@ private:
+ 		case localized_string_id::HOME_MENU_SETTINGS_VIDEO_RESOLUTION_SCALE_THRESHOLD: return tr("Resolution Scale Threshold", "Video");
+ 		case localized_string_id::HOME_MENU_SETTINGS_VIDEO_STRETCH_TO_DISPLAY: return tr("Stretch To Display Area", "Video");
+ 		case localized_string_id::HOME_MENU_SETTINGS_VIDEO_STEREO_MODE: return tr("Stereo Mode", "Video");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING: return tr("Color", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENABLED: return tr("Color Grading", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_BRIGHTNESS: return tr("Brightness", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_CONTRAST: return tr("Contrast", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_GAMMA: return tr("Gamma (Midtones)", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_SHADOWS: return tr("Shadows", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_HIGHLIGHTS: return tr("Highlights", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_SATURATION: return tr("Saturation", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_VIBRANCE: return tr("Vibrance", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TEMPERATURE: return tr("Temperature", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_TINT: return tr("Tint (Green / Magenta)", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_DITHER: return tr("Dither (reduces banding)", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT: return tr("Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT: return tr("Background Input Enabled", "Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED: return tr("Keep Pads Connected", "Input");
