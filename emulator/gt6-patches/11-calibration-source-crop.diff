@@ -1,0 +1,86 @@
+diff --git a/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl b/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
+index 441eb6f4a..6479d490f 100644
+--- a/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
++++ b/rpcs3/Emu/RSX/Program/GLSLSnippets/VideoOutCalibrationPass.glsl
+@@ -53,6 +53,8 @@ layout(push_constant) uniform static_data
+ #define right_anaglyph_matrix mat3(right_anaglyph_cols[0].xyz, right_anaglyph_cols[1].xyz, right_anaglyph_cols[2].xyz)
+ #define grade_offset vec3(left_anaglyph_cols[0].w, left_anaglyph_cols[1].w, left_anaglyph_cols[2].w)
+ #define grade_params vec4(right_anaglyph_cols[0].w, right_anaglyph_cols[1].w, right_anaglyph_cols[2].w, grade_extra.x)
++// Part of the source image that holds the frame (display buffer size / image size); 0 = whole image
++#define src_scale ((grade_extra.z > 0.) ? grade_extra.zw : vec2(1.))
+ #else
+ uniform float gamma;
+ uniform int limit_range;
+@@ -62,6 +64,7 @@ uniform mat3 left_anaglyph_matrix;
+ uniform mat3 right_anaglyph_matrix;
+ uniform vec3 grade_offset;
+ uniform vec4 grade_params; // power, contrast, saturation, vibrance
++#define src_scale vec2(1.)
+ #endif
+ 
+ vec3 applyMatrix(vec3 left, vec3 right)
+@@ -96,7 +99,9 @@ vec4 read_source()
+ {
+ 	if (stereo_display_mode == STEREO_MODE_DISABLED)
+ 	{
+-		return texture(fs0, tc0);
++		// The display buffer can be smaller than the surface it lives in (e.g. GT6): sample only the frame,
++		// like the plain blit does
++		return texture(fs0, tc0 * src_scale);
+ 	}
+ 
+ 	if (stereo_image_count == 1)
+diff --git a/rpcs3/Emu/RSX/VK/VKOverlays.cpp b/rpcs3/Emu/RSX/VK/VKOverlays.cpp
+index fc695813f..0de1d6123 100644
+--- a/rpcs3/Emu/RSX/VK/VKOverlays.cpp
++++ b/rpcs3/Emu/RSX/VK/VKOverlays.cpp
+@@ -928,7 +928,7 @@ namespace vk
+ 
+ 	void video_out_calibration_pass::run(vk::command_buffer& cmd, const areau& viewport, vk::framebuffer* target,
+ 		const rsx::simple_array<vk::viewable_image*>& src, f32 gamma, bool limited_rgb,
+-		bool stereo_enabled, VkRenderPass render_pass)
++		bool stereo_enabled, VkRenderPass render_pass, u32 src_width, u32 src_height)
+ 	{
+ 		static stereo_config stereo_cfg = stereo_config(true);
+ 		stereo_cfg.update_from_config(stereo_enabled);
+@@ -951,6 +951,13 @@ namespace vk
+ 		config.limit_range |= rsx::pack_color_grading(rsx::get_color_grading_params(), stereo_cfg.stereo_mode(),
+ 			config.left_anaglyph_matrix, config.right_anaglyph_matrix, config.grade_extra);
+ 
++		// Frame size inside the source image (0 = all of it)
++		if (src_width && src_height && !src.empty() && src[0]->width() && src[0]->height())
++		{
++			config.grade_extra.z = std::min(1.f, static_cast<f32>(src_width) / static_cast<f32>(src[0]->width()));
++			config.grade_extra.w = std::min(1.f, static_cast<f32>(src_height) / static_cast<f32>(src[0]->height()));
++		}
++
+ 		std::vector<vk::image_view*> views;
+ 		views.reserve(2);
+ 
+diff --git a/rpcs3/Emu/RSX/VK/VKOverlays.h b/rpcs3/Emu/RSX/VK/VKOverlays.h
+index c953e98d2..fb51ea8cb 100644
+--- a/rpcs3/Emu/RSX/VK/VKOverlays.h
++++ b/rpcs3/Emu/RSX/VK/VKOverlays.h
+@@ -243,7 +243,7 @@ namespace vk
+ 
+ 		void run(vk::command_buffer& cmd, const areau& viewport, vk::framebuffer* target,
+ 			const rsx::simple_array<vk::viewable_image*>& src, f32 gamma, bool limited_rgb,
+-			bool stereo_enabled, VkRenderPass render_pass);
++			bool stereo_enabled, VkRenderPass render_pass, u32 src_width = 0, u32 src_height = 0);
+ 	};
+ 
+ 	// TODO: Replace with a proper manager
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 5751e5941..1d64ff726 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -891,7 +891,8 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 
+ 			vk::get_overlay_pass<vk::video_out_calibration_pass>()->run(
+ 				*m_current_command_buffer, areau(aspect_ratio), direct_fbo, calibration_src,
+-				avconfig.gamma, !use_full_rgb_range_output, avconfig.stereo_enabled, single_target_pass);
++				avconfig.gamma, !use_full_rgb_range_output, avconfig.stereo_enabled, single_target_pass,
++				calibration_src[0] == image_to_flip ? buffer_width : 0, calibration_src[0] == image_to_flip ? buffer_height : 0);
+ 
+ 			direct_fbo->release();
+ 		}

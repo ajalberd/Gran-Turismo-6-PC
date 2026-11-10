@@ -15,6 +15,7 @@ patches in [`gt6-patches/`](gt6-patches), applied in order:
 | `08-startup-dialog-steps` | Fixes a startup crash ("Range check failed", `gui_application.cpp`) when a startup dialog is confirmed twice, and skips the "Experimental Build Warning" when the GT6 launcher starts the emulator (`GT6_LAUNCHER`) |
 | `09-color-grading` | Color grading in the video-out pass (after upscaling, before RPCS3's overlays): brightness, contrast, gamma, shadows, highlights, saturation, vibrance, temperature, tint and dither. New `Video/Color Grading` config node, live sliders in the home menu (Settings -> Color), Vulkan and OpenGL. Neutral settings are an exact no-op; off by default. |
 | `10-home-menu-mouse-f10-engine-color` | Home menu: mouse support (click, hover, drag/wheel on sliders, clickable tabs and Save/Discard, right click = back), F10 and Shift+F10 open it from the game window, and live sliders for GT6's own color correction (writes the launcher's engine color patch values every frame while that patch is active, EU 1.22) |
+| `11-calibration-source-crop` | Vulkan video-out pass (gamma, limited range, color grading) samples only the display buffer's region of the source image, like the plain blit. GT6 flips between two buffers, one of them inside a larger surface; with grading on every other frame was drawn shrunk into the top-left corner (flicker). |
 
 Patches 01–05 started from abowen's GT6 RPCS3 research and were rebased onto the current upstream.
 
