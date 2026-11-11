@@ -1,0 +1,26 @@
+diff --git a/rpcs3/Emu/RSX/RSXThread.cpp b/rpcs3/Emu/RSX/RSXThread.cpp
+index a572df4a6..e687ce68d 100644
+--- a/rpcs3/Emu/RSX/RSXThread.cpp
++++ b/rpcs3/Emu/RSX/RSXThread.cpp
+@@ -869,8 +869,20 @@ namespace rsx
+ 			manager->stop_audio();
+ 		}
+ 
+-		while (!test_stopped())
++		while (true)
+ 		{
++			// GT6: a pause that lands between BEGIN and END would park this thread mid-draw, and native UI flips are
++			// refused mid-draw, so the home menu (which pauses the game) was never drawn and the game looked frozen.
++			// Finish the draw first: skip a pure pause request while a draw is open (exit and other flags still go
++			// through check_state as before).
++			if (const bs_t<cpu_flag> flags = state; !(m_ctx->in_begin_end && flags == cpu_flag::dbg_global_pause))
++			{
++				if (test_stopped())
++				{
++					break;
++				}
++			}
++
+ 			// Wait for external pause events
+ 			if (external_interrupt_lock)
+ 			{

@@ -18,6 +18,7 @@ patches in [`gt6-patches/`](gt6-patches), applied in order:
 | `11-calibration-source-crop` | Vulkan video-out pass (gamma, limited range, color grading) samples only the display buffer's region of the source image, like the plain blit. GT6 flips between two buffers, one of them inside a larger surface; with grading on every other frame was drawn shrunk into the top-left corner (flicker). |
 | `12-resume-usercmd-drain` | Crash right after closing the home menu with the game paused (`_gcm_intr_thread` access violation): for 2 s after every resume the USER_COMMAND parameter is drained before it is overwritten (upstream behaviour), so the RSX backlog can't clobber it before GT6's handler has read it. Patch 06's no-stall behaviour applies the rest of the time. |
 | `13-home-menu-compact-slider` | Home menu: Cross or a click on a slider opens a compact adjust view: the menu and its dimming disappear and one slider bar sits at the bottom of the live picture (like a TV's brightness OSD). Left/Right, mouse drag or wheel adjust; Up/Down switch to the neighbouring slider; Select resets; Circle, right click or a click on the picture returns to the menu. |
+| `14-pause-after-draw` | Home menu sometimes not drawn at all (game looks frozen) when it pauses the game: a pause that arrived between BEGIN and END parked the RSX thread mid-draw, where native UI flips are refused. The RSX thread now finishes the open draw before honouring a plain pause. |
 
 Patches 01–05 started from abowen's GT6 RPCS3 research and were rebased onto the current upstream.
 
