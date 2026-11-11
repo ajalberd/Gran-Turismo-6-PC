@@ -1,0 +1,26 @@
+diff --git a/rpcs3/Emu/Cell/lv2/sys_rsx.cpp b/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
+index 7b278d6fb..95f4dbbb3 100644
+--- a/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
++++ b/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
+@@ -1219,7 +1219,20 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
+ 		}
+ 
+ 		const auto intr_cause = static_cast<u32>(a4);
+-		if (rsx::usercmd_legacy_mode())
++
++		// GT6 build: right after a resume (home menu, pause) the RSX thread replays its backlog before the guest's
++		// interrupt thread wakes up. Without the drain the shared userCmdParam is overwritten before the handler
++		// read it and Gran Turismo 6's handler pops an empty queue (crash in _gcm_intr_thread). Drain for a short
++		// window after every resume; everywhere else keep the legacy (no stall) behaviour.
++		static u64 s_seen_pause_time = 0;
++		static u64 s_safe_until = 0;
++		if (const u64 pause_time = Emu.GetPauseTime(); pause_time != s_seen_pause_time)
++		{
++			s_seen_pause_time = pause_time;
++			s_safe_until = get_system_time() + 2'000'000;
++		}
++
++		if (rsx::usercmd_legacy_mode() && get_system_time() >= s_safe_until)
+ 		{
+ 			// GT6 build: pre-#19549 behaviour. Draining here blocks the RSX thread until a guest thread waits on the
+ 			// queue; Gran Turismo 6's handler is often busy, so every drain ran into the 1 s timeout (race freezes).

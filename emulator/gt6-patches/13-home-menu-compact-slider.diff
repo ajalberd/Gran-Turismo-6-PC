@@ -1,0 +1,560 @@
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
+index 350a59cd0..383c50772 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu.cpp
+@@ -80,6 +80,13 @@ namespace rsx
+ 				break;
+ 			}
+ 
++			// GT6: compact adjust view owns all input while open
++			if (home_menu_page* focus = home_menu_page::slider_focus())
++			{
++				handle_navigation(focus->handle_slider_focus_button(button_press, is_auto_repeat, m_auto_repeat_ms_interval));
++				return;
++			}
++
+ 			handle_navigation(m_main_menu.handle_button_press(button_press, is_auto_repeat, m_auto_repeat_ms_interval));
+ 		}
+ 
+@@ -87,6 +94,12 @@ namespace rsx
+ 		{
+ 			if (fade_animation.active) return;
+ 
++			if (home_menu_page* focus = home_menu_page::slider_focus())
++			{
++				handle_navigation(focus->handle_slider_focus_mouse(event, x, y));
++				return;
++			}
++
+ 			handle_navigation(m_main_menu.handle_mouse(event, x, y));
+ 		}
+ 
+@@ -157,6 +170,15 @@ namespace rsx
+ 			}
+ 
+ 			compiled_resource result;
++
++			// GT6: compact adjust view: no dimming, no menu, just the one slider over the live picture
++			if (home_menu_page* focus = home_menu_page::slider_focus())
++			{
++				result.add(focus->get_slider_focus_compiled());
++				fade_animation.apply(result);
++				return result;
++			}
++
+ 			result.add(m_dim_background.get_compiled());
+ 			result.add(m_main_menu.get_compiled());
+ 			result.add(m_description.get_compiled());
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
+index b8ac116e5..b1ecbf155 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_components.h
+@@ -288,10 +288,16 @@ namespace rsx
+ 			compiled_resource m_popup_compiled_resources;
+ 		};
+ 
+-		// GT6: lets mouse input recognise sliders (drag / wheel adjust instead of click-to-activate)
++		// GT6: lets mouse input recognise sliders, and gives the compact "adjust" view what it shows
+ 		struct home_menu_slider_tag
+ 		{
+ 			virtual ~home_menu_slider_tag() = default;
++
++			virtual std::string slider_label() const = 0;
++			virtual f64 slider_value() const = 0;
++			virtual f64 slider_min() const = 0;
++			virtual f64 slider_max() const = 0;
++			virtual std::string slider_format(f64 value) const = 0;
+ 		};
+ 
+ 		template <typename T, typename C>
+@@ -335,20 +341,7 @@ namespace rsx
+ 
+ 				auto formatter = [this](f64 value) -> std::string
+ 				{
+-					const auto typed_value = static_cast<T>(value);
+-					if (const auto it = m_special_labels.find(typed_value); it != m_special_labels.cend())
+-					{
+-						return it->second;
+-					}
+-
+-					if constexpr (std::is_floating_point_v<T>)
+-					{
+-						return fmt::format("%.2f%s", typed_value, m_suffix);
+-					}
+-					else
+-					{
+-						return fmt::format("%d%s", typed_value, m_suffix);
+-					}
++					return slider_format(value);
+ 				};
+ 
+ 				m_slider_component->set_value_format(formatter);
+@@ -361,6 +354,29 @@ namespace rsx
+ 				return this->compiled_resources;
+ 			}
+ 
++			std::string slider_label() const override { return this->m_label_text; }
++			f64 slider_value() const override { return this->m_setting ? static_cast<f64>(this->m_setting->get()) : 0.; }
++			f64 slider_min() const override { return static_cast<f64>(m_minimum); }
++			f64 slider_max() const override { return static_cast<f64>(m_maximum); }
++
++			std::string slider_format(f64 value) const override
++			{
++				const auto typed_value = static_cast<T>(value);
++				if (const auto it = m_special_labels.find(typed_value); it != m_special_labels.cend())
++				{
++					return it->second;
++				}
++
++				if constexpr (std::is_floating_point_v<T>)
++				{
++					return fmt::format("%.2f%s", typed_value, m_suffix);
++				}
++				else
++				{
++					return fmt::format("%d%s", typed_value, m_suffix);
++				}
++			}
++
+ 		private:
+ 			slider* m_slider_component = nullptr;
+ 
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
+index 3717472f3..86afeaa42 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.cpp
+@@ -46,6 +46,14 @@ namespace rsx
+ 			set_pos(x, y);
+ 		}
+ 
++		home_menu_page::~home_menu_page()
++		{
++			if (s_slider_focus == this)
++			{
++				s_slider_focus = nullptr;
++			}
++		}
++
+ 		void home_menu_page::on_activate()
+ 		{
+ 			hide_row_highliter(false);
+@@ -194,6 +202,13 @@ namespace rsx
+ 				return page_navigation::stay;
+ 			}
+ 
++			// GT6: Cross on a slider opens the compact adjust view
++			if (button_press == pad_button::cross && enter_slider_focus())
++			{
++				play_sound(sound_effect::accept);
++				return page_navigation::stay;
++			}
++
+ 			switch (button_press)
+ 			{
+ 			case pad_button::dpad_left:
+@@ -388,6 +403,12 @@ namespace rsx
+ 					m_mouse_dragging = true;
+ 					m_drag_origin_x = mx;
+ 					m_drag_steps = 0;
++
++					// Open the compact adjust view; the drag carries on there
++					if (enter_slider_focus())
++					{
++						play_sound(sound_effect::accept);
++					}
+ 					return page_navigation::stay;
+ 				}
+ 
+@@ -429,6 +450,331 @@ namespace rsx
+ 			return page_navigation::stay;
+ 		}
+ 
++		// ---- GT6: compact adjust view ----
++
++		namespace
++		{
++			constexpr u16 focus_panel_w = 720;
++			constexpr u16 focus_panel_h = 108;
++			constexpr s16 focus_panel_x = (overlay::virtual_width - focus_panel_w) / 2;
++			constexpr s16 focus_panel_y = overlay::virtual_height - focus_panel_h - 36;
++			constexpr s16 focus_margin = 28;
++			constexpr s16 focus_rail_x = focus_panel_x + focus_margin;
++			constexpr s16 focus_rail_y = focus_panel_y + 58;
++			constexpr u16 focus_rail_w = focus_panel_w - 2 * focus_margin;
++			constexpr u16 focus_rail_h = 6;
++			constexpr u16 focus_knob_d = 20;
++
++			bool in_focus_panel(s16 mx, s16 my)
++			{
++				return mx >= focus_panel_x && mx < focus_panel_x + focus_panel_w && my >= focus_panel_y && my < focus_panel_y + focus_panel_h;
++			}
++
++			bool on_focus_rail(s16 mx, s16 my)
++			{
++				return mx >= focus_rail_x - 16 && mx <= focus_rail_x + focus_rail_w + 16 && my >= focus_rail_y - 22 && my <= focus_rail_y + focus_rail_h + 22;
++			}
++		}
++
++		home_menu_slider_tag* home_menu_page::selected_slider() const
++		{
++			return dynamic_cast<home_menu_slider_tag*>(const_cast<overlay_element*>(get_selected_entry()));
++		}
++
++		bool home_menu_page::enter_slider_focus()
++		{
++			const home_menu_slider_tag* tag = selected_slider();
++			if (!tag || s_slider_focus)
++			{
++				return false;
++			}
++
++			s_slider_focus = this;
++			m_focus_drag_absolute = false;
++			rsx_log.notice("Home menu: compact adjust view for '%s'", tag->slider_label());
++			return true;
++		}
++
++		void home_menu_page::exit_slider_focus()
++		{
++			if (home_menu_page* page = s_slider_focus)
++			{
++				s_slider_focus = nullptr;
++				page->m_mouse_dragging = false;
++				page->m_focus_drag_absolute = false;
++				page->refresh();
++			}
++		}
++
++		s32 home_menu_page::adjacent_slider(s32 direction) const
++		{
++			const s32 count = get_elements_count();
++			for (s32 index = get_selected_index() + direction; index >= 0 && index < count; index += direction)
++			{
++				if (dynamic_cast<const home_menu_slider_tag*>(get_entry(index)))
++				{
++					return index;
++				}
++			}
++			return -1;
++		}
++
++		void home_menu_page::set_slider_value(f64 target)
++		{
++			const home_menu_slider_tag* tag = selected_slider();
++			const usz index = static_cast<usz>(get_selected_index());
++			if (!tag || index >= m_callbacks.size() || !m_callbacks[index])
++			{
++				return;
++			}
++
++			// Step with the slider's own callback: keeps its step size, limits, logging and change tracking
++			const auto& callback = m_callbacks[index];
++			const bool right = target > tag->slider_value();
++
++			for (int i = 0; i < 1000; i++)
++			{
++				const f64 before = tag->slider_value();
++				if (right ? before >= target : before <= target)
++				{
++					break;
++				}
++
++				callback(right ? pad_button::dpad_right : pad_button::dpad_left);
++
++				const f64 after = tag->slider_value();
++				if (after == before)
++				{
++					break; // at a limit
++				}
++
++				if (right ? after > target : after < target)
++				{
++					// Overshot: keep whichever step is closer
++					if (std::abs(after - target) > std::abs(before - target))
++					{
++						callback(right ? pad_button::dpad_left : pad_button::dpad_right);
++					}
++					break;
++				}
++			}
++		}
++
++		page_navigation home_menu_page::handle_slider_focus_button(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms)
++		{
++			const bool quiet = is_auto_repeat && auto_repeat_interval_ms < user_interface::m_auto_repeat_ms_interval_default;
++
++			switch (button_press)
++			{
++			case pad_button::dpad_left:
++			case pad_button::dpad_right:
++			case pad_button::ls_left:
++			case pad_button::ls_right:
++			case pad_button::select:
++			{
++				// Adjust / Select = reset to default
++				if (const usz index = static_cast<usz>(get_selected_index()); index < m_callbacks.size() && m_callbacks[index])
++				{
++					if (!quiet) play_sound(sound_effect::cursor);
++					m_callbacks[index](button_press);
++				}
++				break;
++			}
++			case pad_button::dpad_up:
++			case pad_button::ls_up:
++			case pad_button::dpad_down:
++			case pad_button::ls_down:
++			{
++				// Previous / next slider on the same page without leaving the compact view
++				const bool up = button_press == pad_button::dpad_up || button_press == pad_button::ls_up;
++				if (const s32 index = adjacent_slider(up ? -1 : 1); index >= 0)
++				{
++					select_entry(index);
++					if (!quiet) play_sound(sound_effect::cursor);
++				}
++				break;
++			}
++			case pad_button::cross:
++			case pad_button::circle:
++			{
++				play_sound(sound_effect::cancel);
++				exit_slider_focus();
++				break;
++			}
++			default:
++				break;
++			}
++
++			return page_navigation::stay;
++		}
++
++		page_navigation home_menu_page::handle_slider_focus_mouse(const overlay_mouse_event& event, s16 mx, s16 my)
++		{
++			using type = overlay_mouse_event::type;
++			constexpr s32 drag_step_px = 12;
++
++			const home_menu_slider_tag* tag = selected_slider();
++			if (!tag)
++			{
++				exit_slider_focus();
++				return page_navigation::stay;
++			}
++
++			const auto value_at = [tag](s16 x) -> f64
++			{
++				const f64 t = std::clamp(static_cast<f64>(x - focus_rail_x) / focus_rail_w, 0., 1.);
++				return tag->slider_min() + t * (tag->slider_max() - tag->slider_min());
++			};
++
++			switch (event.kind)
++			{
++			case type::press:
++			{
++				if (event.button == mouse_right || event.button == mouse_back || (event.button == mouse_left && !in_focus_panel(mx, my)))
++				{
++					// Right click, or a click anywhere on the picture = done
++					play_sound(sound_effect::cancel);
++					exit_slider_focus();
++					return page_navigation::stay;
++				}
++
++				if (event.button == mouse_left && on_focus_rail(mx, my))
++				{
++					// Click / drag on the bar: the value follows the pointer
++					m_mouse_dragging = true;
++					m_focus_drag_absolute = true;
++					set_slider_value(value_at(mx));
++				}
++				return page_navigation::stay;
++			}
++			case type::move:
++			{
++				if (!m_mouse_dragging)
++				{
++					return page_navigation::stay;
++				}
++
++				if (m_focus_drag_absolute)
++				{
++					set_slider_value(value_at(mx));
++					return page_navigation::stay;
++				}
++
++				// Drag that started on the menu row: keep it relative
++				const s32 steps = (mx - m_drag_origin_x) / drag_step_px;
++				for (; m_drag_steps < steps; m_drag_steps++) handle_slider_focus_button(pad_button::dpad_right, true, 10);
++				for (; m_drag_steps > steps; m_drag_steps--) handle_slider_focus_button(pad_button::dpad_left, true, 10);
++				return page_navigation::stay;
++			}
++			case type::release:
++			{
++				m_mouse_dragging = false;
++				m_focus_drag_absolute = false;
++				return page_navigation::stay;
++			}
++			case type::wheel:
++			{
++				return handle_slider_focus_button(event.wheel > 0 ? pad_button::dpad_right : pad_button::dpad_left, false, user_interface::m_auto_repeat_ms_interval_default);
++			}
++			}
++
++			return page_navigation::stay;
++		}
++
++		compiled_resource home_menu_page::get_slider_focus_compiled()
++		{
++			compiled_resource result;
++
++			const home_menu_slider_tag* tag = selected_slider();
++			if (!tag)
++			{
++				return result;
++			}
++
++			// Same accent as the menu's own sliders (follows the theme)
++			const slider theme;
++			const color4f accent = theme.fore_color;
++
++			const f64 minimum = tag->slider_min();
++			const f64 maximum = tag->slider_max();
++			const f64 value = std::clamp(tag->slider_value(), minimum, maximum);
++			const auto x_of = [&](f64 v) -> s16
++			{
++				const f64 range = maximum - minimum;
++				return static_cast<s16>(focus_rail_x + (range > 0. ? (v - minimum) / range : 0.) * focus_rail_w);
++			};
++
++			rounded_rect panel;
++			panel.border_radius = 12;
++			panel.set_pos(focus_panel_x, focus_panel_y);
++			panel.set_size(focus_panel_w, focus_panel_h);
++			panel.back_color = color4f(0.03f, 0.03f, 0.04f, 0.78f);
++			result.add(panel.get_compiled());
++
++			label name(tag->slider_label());
++			name.set_font(18);
++			name.back_color.a = 0.f;
++			name.fore_color = color4f(1.f);
++			name.auto_resize();
++			name.set_pos(focus_rail_x, focus_panel_y + 14);
++			result.add(name.get_compiled());
++
++			label value_text(tag->slider_format(value));
++			value_text.set_font(18);
++			value_text.back_color.a = 0.f;
++			value_text.fore_color = accent;
++			value_text.auto_resize();
++			value_text.set_pos(focus_rail_x + focus_rail_w - value_text.w, focus_panel_y + 14);
++			result.add(value_text.get_compiled());
++
++			rounded_rect rail;
++			rail.border_radius = focus_rail_h / 2;
++			rail.set_pos(focus_rail_x, focus_rail_y);
++			rail.set_size(focus_rail_w, focus_rail_h);
++			rail.back_color = color4f(0.35f, 0.35f, 0.38f, 1.f);
++			result.add(rail.get_compiled());
++
++			// Fill from the neutral point (0 on -100..100 sliders) to the value
++			const f64 origin = (minimum < 0. && maximum > 0.) ? 0. : minimum;
++			const s16 x0 = std::min(x_of(origin), x_of(value));
++			const s16 x1 = std::max(x_of(origin), x_of(value));
++			if (x1 > x0)
++			{
++				rounded_rect fill;
++				fill.border_radius = focus_rail_h / 2;
++				fill.set_pos(x0, focus_rail_y);
++				fill.set_size(static_cast<u16>(x1 - x0), focus_rail_h);
++				fill.back_color = accent;
++				result.add(fill.get_compiled());
++			}
++
++			if (origin != minimum)
++			{
++				overlay_element tick;
++				tick.set_pos(x_of(origin) - 1, focus_rail_y - 6);
++				tick.set_size(2, focus_rail_h + 12);
++				tick.back_color = color4f(0.8f, 0.8f, 0.8f, 0.9f);
++				result.add(tick.get_compiled());
++			}
++
++			ellipse knob;
++			knob.border_radius = focus_knob_d / 2;
++			knob.set_pos(x_of(value) - focus_knob_d / 2, focus_rail_y + focus_rail_h / 2 - focus_knob_d / 2);
++			knob.set_size(focus_knob_d, focus_knob_d);
++			knob.back_color = color4f(1.f);
++			result.add(knob.get_compiled());
++
++			label hint(get_localized_string(localized_string_id::HOME_MENU_SLIDER_ADJUST_HINT));
++			hint.set_font(12);
++			hint.back_color.a = 0.f;
++			hint.fore_color = color4f(0.7f, 0.7f, 0.72f, 1.f);
++			hint.auto_resize();
++			hint.set_pos(focus_panel_x + (focus_panel_w - hint.w) / 2, focus_panel_y + focus_panel_h - hint.h - 8);
++			result.add(hint.get_compiled());
++
++			return result;
++		}
++
+ 		void home_menu_page::translate(s16 _x, s16 _y)
+ 		{
+ 			list_view::translate(_x, _y);
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
+index 040a30393..38e1009e3 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_page.h
+@@ -27,6 +27,16 @@ namespace rsx
+ 		{
+ 		public:
+ 			home_menu_page(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent, const std::string& title);
++			~home_menu_page();
++
++			// GT6: compact adjust view. Activating a slider hides the whole menu except one small slider bar, so the
++			// picture can be judged while it changes (like a TV's brightness OSD). The home menu dialog routes all
++			// input to the page that owns it.
++			static home_menu_page* slider_focus() { return s_slider_focus; }
++			page_navigation handle_slider_focus_button(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms);
++			page_navigation handle_slider_focus_mouse(const overlay_mouse_event& event, s16 mx, s16 my);
++			compiled_resource get_slider_focus_compiled();
++			static void exit_slider_focus();
+ 
+ 			void set_current_page(home_menu_page* page);
+ 			home_menu_page* get_current_page(bool include_this);
+@@ -73,6 +83,15 @@ namespace rsx
+ 			bool m_mouse_dragging = false;
+ 			s16 m_drag_origin_x = 0;
+ 			s32 m_drag_steps = 0;
++
++			// GT6: compact adjust view
++			bool enter_slider_focus();
++			void set_slider_value(f64 target);
++			s32 adjacent_slider(s32 direction) const;
++			home_menu_slider_tag* selected_slider() const;
++
++			static inline home_menu_page* s_slider_focus = nullptr;
++			bool m_focus_drag_absolute = false;
+ 		};
+ 	}
+ }
+diff --git a/rpcs3/Emu/localized_string_id.h b/rpcs3/Emu/localized_string_id.h
+index 8f7caf727..a1adb1e88 100644
+--- a/rpcs3/Emu/localized_string_id.h
++++ b/rpcs3/Emu/localized_string_id.h
+@@ -214,6 +214,7 @@ enum class localized_string_id
+ 	HOME_MENU_SETTINGS,
+ 	HOME_MENU_SETTINGS_SAVE,
+ 	HOME_MENU_SETTINGS_SAVE_BUTTON,
++	HOME_MENU_SLIDER_ADJUST_HINT,
+ 	HOME_MENU_SETTINGS_DISCARD,
+ 	HOME_MENU_SETTINGS_DISCARD_BUTTON,
+ 	HOME_MENU_SETTINGS_RESET_BUTTON,
+diff --git a/rpcs3/rpcs3qt/localized_emu.h b/rpcs3/rpcs3qt/localized_emu.h
+index 0590c7c2f..072bf7bf6 100644
+--- a/rpcs3/rpcs3qt/localized_emu.h
++++ b/rpcs3/rpcs3qt/localized_emu.h
+@@ -235,6 +235,7 @@ private:
+ 		case localized_string_id::HOME_MENU_SETTINGS: return tr("Settings");
+ 		case localized_string_id::HOME_MENU_SETTINGS_SAVE: return tr("Save custom configuration?");
+ 		case localized_string_id::HOME_MENU_SETTINGS_SAVE_BUTTON: return tr("Save");
++		case localized_string_id::HOME_MENU_SLIDER_ADJUST_HINT: return tr("Left/Right or drag: adjust    Up/Down: other setting    Select: reset    Circle: back");
+ 		case localized_string_id::HOME_MENU_SETTINGS_DISCARD: return tr("Discard the current settings' changes?");
+ 		case localized_string_id::HOME_MENU_SETTINGS_DISCARD_BUTTON: return tr("Discard");
+ 		case localized_string_id::HOME_MENU_SETTINGS_RESET_BUTTON: return tr("To default");
