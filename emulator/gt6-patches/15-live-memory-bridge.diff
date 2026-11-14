@@ -1,0 +1,250 @@
+diff --git a/rpcs3/Emu/RSX/GL/GLPresent.cpp b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+index e3f7eb7c3..9d58fb15c 100644
+--- a/rpcs3/Emu/RSX/GL/GLPresent.cpp
++++ b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+@@ -10,6 +10,7 @@
+ #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
+ #include "Emu/RSX/Overlays/overlay_mouse_input.h"
+ #include "Emu/RSX/gt6_engine_color.h"
++#include "Emu/RSX/gt6_live_bridge.h"
+ 
+ #include "util/video_provider.h"
+ 
+@@ -297,6 +298,7 @@ bool GLGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	// GT6: overlay mouse mapping and live engine color correction
+ 	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
+ 	rsx::gt6::update_engine_color();
++	rsx::gt6::update_live_bridge();
+ 
+ 	if (!image_to_flip || aspect_ratio.x1 || aspect_ratio.y1)
+ 	{
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 1d64ff726..55e25b121 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -7,6 +7,7 @@
+ #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
+ #include "Emu/RSX/Overlays/overlay_mouse_input.h"
+ #include "Emu/RSX/gt6_engine_color.h"
++#include "Emu/RSX/gt6_live_bridge.h"
+ #include "Emu/Cell/Modules/cellVideoOut.h"
+ 
+ #include "upscalers/bilinear_pass.hpp"
+@@ -673,6 +674,7 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	// GT6: overlay mouse mapping and live engine color correction
+ 	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
+ 	rsx::gt6::update_engine_color();
++	rsx::gt6::update_live_bridge();
+ 
+ 	// Blit contents to screen..
+ 	VkImage target_image = m_swapchain->get_image(m_current_frame->present_image);
+diff --git a/rpcs3/Emu/RSX/gt6_live_bridge.h b/rpcs3/Emu/RSX/gt6_live_bridge.h
+new file mode 100644
+index 000000000..ba6d23967
+--- /dev/null
++++ b/rpcs3/Emu/RSX/gt6_live_bridge.h
+@@ -0,0 +1,204 @@
++#pragma once
++
++// GT6: developer bridge for live memory tuning (camera, physics research).
++//
++// Inactive unless <config dir>/gt6_live.txt exists. Every 200 ms (from the presenter) the file is re-read and run;
++// results go to <config dir>/gt6_live_out.txt. One command per line, '#' starts a comment:
++//
++//   wf  <addr> <float>...   write big-endian floats once (again whenever the file changes)
++//   wf! <addr> <float>...   write every poll
++//   w32 <addr> <u32>...     write words once (hex 0x.. or decimal);  w32! = every poll
++//   rf  <addr> <count>      read floats  -> out file
++//   r32 <addr> <count>      read words   -> out file
++//
++// <addr> is an expression: number, [expr] (read a pointer at expr), and +/- offsets, e.g. [[0x16b6e98]+0x10]+0x54.
++// Data only: rewriting PPU code here would not reach already recompiled code; use game patches for that.
++
++#include "Emu/System.h"
++#include "Emu/Memory/vm.h"
++#include "Emu/Cell/timers.hpp"
++#include "Utilities/File.h"
++
++#include <cstdlib>
++#include <optional>
++#include <sstream>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace rsx::gt6
++{
++	namespace live_detail
++	{
++		inline bool readable(u32 addr, u32 size)
++		{
++			return vm::check_addr(addr, vm::page_readable, size);
++		}
++
++		// expr := term (('+'|'-') term)* ; term := number | '[' expr ']'
++		inline std::optional<u32> eval(std::string_view s, usz& i);
++
++		inline std::optional<u32> term(std::string_view s, usz& i)
++		{
++			if (i < s.size() && s[i] == '[')
++			{
++				i++;
++				const auto inner = eval(s, i);
++				if (!inner || i >= s.size() || s[i] != ']' || !readable(*inner, 4))
++				{
++					return std::nullopt;
++				}
++				i++;
++				return static_cast<u32>(vm::read32(*inner));
++			}
++
++			const std::string rest(s.substr(i));
++			char* end = nullptr;
++			const unsigned long long v = std::strtoull(rest.c_str(), &end, 0);
++			if (end == rest.c_str())
++			{
++				return std::nullopt;
++			}
++			i += static_cast<usz>(end - rest.c_str());
++			return static_cast<u32>(v);
++		}
++
++		inline std::optional<u32> eval(std::string_view s, usz& i)
++		{
++			auto value = term(s, i);
++			while (value && i < s.size() && (s[i] == '+' || s[i] == '-'))
++			{
++				const bool add = s[i++] == '+';
++				const auto rhs = term(s, i);
++				if (!rhs) return std::nullopt;
++				*value = add ? *value + *rhs : *value - *rhs;
++			}
++			return value;
++		}
++
++		inline std::optional<u32> address(const std::string& token)
++		{
++			usz i = 0;
++			const auto v = eval(token, i);
++			return (v && i == token.size()) ? v : std::nullopt;
++		}
++	}
++
++	// Called once per presented frame
++	inline void update_live_bridge()
++	{
++		using namespace live_detail;
++
++		static u64 s_next_poll = 0;
++		static s64 s_mtime = -1;
++		static u64 s_size = umax;
++		static std::vector<std::string> s_lines;
++
++		const u64 now = get_system_time();
++		if (now < s_next_poll)
++		{
++			return;
++		}
++		s_next_poll = now + 200'000;
++
++		if (Emu.GetTitleID() != "BCES01893")
++		{
++			return;
++		}
++
++		std::string dir = fs::get_config_dir();
++		if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += '/';
++
++		fs::stat_t st{};
++		if (!fs::get_stat(dir + "gt6_live.txt", st) || st.is_directory)
++		{
++			return;
++		}
++
++		bool changed = false;
++		if (st.mtime != s_mtime || st.size != s_size)
++		{
++			fs::file f(dir + "gt6_live.txt");
++			if (!f)
++			{
++				return;
++			}
++
++			s_mtime = st.mtime;
++			s_size = st.size;
++			s_lines.clear();
++
++			std::istringstream in(f.to_string());
++			for (std::string line; std::getline(in, line);)
++			{
++				if (const usz hash = line.find('#'); hash != umax) line.resize(hash);
++				if (line.find_first_not_of(" \t\r") != umax) s_lines.push_back(line);
++			}
++			changed = true;
++		}
++
++		std::string out = fmt::format("# frame time %llu us\n", now);
++
++		for (const std::string& line : s_lines)
++		{
++			std::istringstream ls(line);
++			std::string cmd, addr_token;
++			ls >> cmd >> addr_token;
++
++			const auto addr = address(addr_token);
++			if (!addr)
++			{
++				out += fmt::format("! bad address: %s\n", line);
++				continue;
++			}
++
++			const bool every_poll = !cmd.empty() && cmd.back() == '!';
++			if (every_poll) cmd.pop_back();
++
++			if (cmd == "wf" || cmd == "w32")
++			{
++				if (!changed && !every_poll) continue;
++
++				u32 a = *addr;
++				for (std::string v; ls >> v; a += 4)
++				{
++					if (!readable(a, 4))
++					{
++						out += fmt::format("! unmapped 0x%08x\n", a);
++						break;
++					}
++
++					if (cmd == "wf") *vm::get_super_ptr<f32>(a) = static_cast<f32>(std::strtod(v.c_str(), nullptr));
++					else *vm::get_super_ptr<u32>(a) = static_cast<u32>(std::strtoull(v.c_str(), nullptr, 0));
++				}
++				continue;
++			}
++
++			if (cmd == "rf" || cmd == "r32")
++			{
++				u32 count = 1;
++				ls >> count;
++				count = std::clamp<u32>(count, 1, 256);
++
++				if (!readable(*addr, count * 4))
++				{
++					out += fmt::format("%s 0x%08x: unmapped\n", cmd, *addr);
++					continue;
++				}
++
++				out += fmt::format("%s 0x%08x:", cmd, *addr);
++				for (u32 n = 0; n < count; n++)
++				{
++					if (cmd == "rf") out += fmt::format(" %.6g", static_cast<f32>(*vm::get_super_ptr<f32>(*addr + n * 4)));
++					else out += fmt::format(" %08x", static_cast<u32>(*vm::get_super_ptr<u32>(*addr + n * 4)));
++				}
++				out += '\n';
++				continue;
++			}
++
++			out += fmt::format("! unknown command: %s\n", line);
++		}
++
++		fs::write_file(dir + "gt6_live_out.txt", fs::rewrite, out);
++	}
++}
