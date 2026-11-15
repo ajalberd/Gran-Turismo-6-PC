@@ -545,6 +545,18 @@ class MainWindow(QMainWindow):
             sp.valueChanged.connect(lambda n, k=key: self._set(k, n))
             self.ctl[key] = sp
             f.addRow(f"{txt} vertical FOV", sp)
+        self.ctl["head_motion"] = self._check(
+            "Cockpit head motion from G-forces (experimental)", "head_motion",
+            "Moves the cockpit view with braking, acceleration and cornering using GT6's own neck model "
+            "(normally used only for crashes). EU 1.22.")
+        f.addRow("", self.ctl["head_motion"])
+        sp = QSpinBox()
+        sp.setRange(1, 20)
+        sp.setSuffix(" x")
+        sp.setToolTip("How strongly G-forces move the head (5 x is a good start).")
+        sp.valueChanged.connect(lambda n: self._set("hm_strength", n))
+        self.ctl["hm_strength"] = sp
+        f.addRow("Head motion strength", sp)
         v.addWidget(g)
 
         g = QGroupBox("Emulation")
@@ -870,7 +882,7 @@ class MainWindow(QMainWindow):
             self._loading = False
         self._update_hints()
         if key in ("aa", "aspect", "motion_blur", "depth_of_field", "shadows", "lamp_glare", "unlock_menu_fps",
-                   "resolution_scale", "lan_enabled", "online_enabled", "dev_menu", "engine_color")                 or key.startswith(("fov_", "cge_")):
+                   "resolution_scale", "lan_enabled", "online_enabled", "dev_menu", "engine_color", "head_motion")                 or key.startswith(("fov_", "cge_", "hm_")):
             self._fill_patch_list()
 
     def _save_soon(self) -> None:

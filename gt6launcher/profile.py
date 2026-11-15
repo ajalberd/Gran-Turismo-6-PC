@@ -136,6 +136,9 @@ class Settings:
     cg_temperature: int = 0
     cg_tint: int = 0
     cg_dither: bool = True
+    # Cockpit head motion from G-forces (head_motion.py game patch)
+    head_motion: bool = False
+    hm_strength: int = 5
     # GT6's own color correction (game patch), see ENGINE_COLOR
     engine_color: bool = False
     cge_gain_r: int = 0
@@ -393,6 +396,9 @@ def desired_patches(s: Settings, version: str | None) -> dict[str, dict[str, flo
     want["Auto Exposure Resolution Scale Fix"] = {}
     want["Smoke and Dust Resolution Scale Fix"] = {}
     want["Movie Playback Fix"] = {}
+    if s.head_motion:
+        from . import head_motion
+        want[head_motion.PATCH_NAME] = head_motion.patch_values(s)
     if s.engine_color:
         from . import engine_color
         want[engine_color.PATCH_NAME] = engine_color.patch_values(s)

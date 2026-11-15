@@ -23,7 +23,7 @@ import random
 import re
 import socket
 
-from . import engine_color, paths
+from . import engine_color, head_motion, paths
 from .yamlio import load_cfg, dump_cfg, atomic_write
 
 # PPU executable hashes of EMAIN.SELF 1.22 (from imported_patch.yml / patch.yml)
@@ -103,7 +103,7 @@ def patch_file_text(title_id: str) -> str:
     Patch Version: 1.0
     Patch:
 {_MEMBER_INFO}
-{engine_color.patch_yaml(title_id)}"""
+{engine_color.patch_yaml(title_id)}{head_motion.patch_yaml(title_id)}"""
 
 
 def title_patch_files(title_id: str, version: str | None) -> dict[str, str]:
