@@ -9,7 +9,8 @@ Reverse engineered from the decrypted EMAIN.SELF (notes: docs/re/gt6-head-motion
 * Stock GT6 only uses it for crashes: an axis must exceed 200 m/s^2 (0x1130078) and the car must report a
   collision this frame (virtual call at 0x2F94C4), so the cockpit looks static while driving.
 
-This patch skips the collision check, lowers the threshold and scales the acceleration up (smaller
+It is also fed the change of acceleration between frames (jerk, 0x2F90B0), which only crashes make large.
+This patch feeds it the acceleration itself, skips the collision check, lowers the threshold and scales the acceleration up (smaller
 normaliser at 0x113007C / 0x1130080, stock 500), so normal braking and cornering move the head through
 GT6's own springs and gains. Crash reactions keep working, capped at the same normalised limit.
 """
@@ -18,6 +19,9 @@ from __future__ import annotations
 PATCH_NAME = "Cockpit Head Motion (experimental)"
 VERIFIED_TITLES = {"BCES01893"}
 
+JERK = 0x002F90B0            # vsubfp v1, v1, v0: accel - previous accel (GT6 feeds the rig jerk)
+JERK_ORIGINAL = 0x1021004A
+NOP = 0x60000000             # -> the rig gets the acceleration itself
 GATE = 0x002F949C            # lbz r0, 0x1e4(r31): collision gate in ImpactBlurCamera::update
 GATE_ORIGINAL = 0x881F01E4
 GATE_SKIP = 0x48000070       # b 0x2F950C (straight to the channel update)
@@ -52,7 +56,7 @@ def patch_yaml(title_id: str) -> str:
         '    Author: "GT6 Launcher"',
         '    Notes: "Drives GT6\'s own cockpit neck rig (head slide, pitch, yaw, roll) from normal driving '
         'G-forces instead of only crashes. Experimental."',
-        "    Patch Version: 1.0",
+        "    Patch Version: 1.1",
         "    Configurable Values:",
         '      "Threshold":',
         "        Type: double_range", "        Value: 0.0", "        Min: 0.0", "        Max: 200.0",
@@ -61,6 +65,7 @@ def patch_yaml(title_id: str) -> str:
         '      "Clamp Max":',
         "        Type: double_range", f"        Value: {n}", "        Min: 10.0", "        Max: 500.0",
         "    Patch:",
+        f"      - [ be32, {JERK:#010x}, {NOP:#010x} ]  # was {JERK_ORIGINAL:#010x} vsubfp: feed acceleration, not jerk",
         f"      - [ be32, {GATE:#010x}, {GATE_SKIP:#010x} ]  # was {GATE_ORIGINAL:#010x} lbz r0,0x1e4(r31): skip collision gate",
         f'      - [ bef32, {THRESHOLD:#010x}, "Threshold" ]',
         f'      - [ bef32, {CLAMP_MIN:#010x}, "Clamp Min" ]',
