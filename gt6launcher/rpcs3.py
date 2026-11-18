@@ -31,8 +31,9 @@ def _clean_env() -> dict[str, str]:
     # Our own AppImage runtime variables must not confuse RPCS3's AppImage detection.
     for var in ("APPIMAGE", "APPDIR", "ARGV0", "OWD", "APPIMAGE_EXTRACT_AND_RUN"):
         env.pop(var, None)
-    # GT6-patched RPCS3 (patch 08): started by the launcher -> no "Experimental Build" question
-    env["GT6_LAUNCHER"] = "1"
+    # Clear origin flags inherited from a shell; each RPCS3 operation sets its own marker.
+    for var in ("GT6_LAUNCHER", "GT6_LAUNCHER_GUI", "GT6_LAUNCHER_TOOL"):
+        env.pop(var, None)
     if paths.IS_WINDOWS:
         env["RPCS3_CONFIG_DIR"] = paths.rpcs3_config_dir().replace("\\", "/").rstrip("/") + "/"
     else:
@@ -268,7 +269,9 @@ class RPCS3:
         kw = {}
         if paths.IS_WINDOWS:
             kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-        p = _popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=_clean_env(),
+        env = _clean_env()
+        env["GT6_LAUNCHER_TOOL"] = "1"
+        p = _popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                              stdin=subprocess.DEVNULL, text=True, errors="replace", **kw)
         try:
             out, _ = p.communicate(timeout=timeout)
@@ -328,6 +331,7 @@ class RPCS3:
         seed_gui_settings()
         env = _clean_env()
         env["GT6_WINDOW_ICON"] = window_icon()  # honoured by the GT6-patched RPCS3 build
+        env["GT6_LAUNCHER"] = "1"
         if extra_env:
             env.update(extra_env)
         self.log("$ " + " ".join(cmd))
@@ -341,6 +345,7 @@ class RPCS3:
         kw = {} if paths.IS_WINDOWS else {"start_new_session": True}
         env = _clean_env()
         env["GT6_WINDOW_ICON"] = window_icon()
+        env["GT6_LAUNCHER_GUI"] = "1"
         return _popen(self._cmd(), env=env, stdin=subprocess.DEVNULL, cwd=self._workdir(), **kw)
 
     @staticmethod

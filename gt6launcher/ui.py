@@ -8,21 +8,28 @@ import threading
 import traceback
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImage, QLinearGradient, QPainter
+from PySide6.QtCore import (
+    QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
+)
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QFont, QIcon, QImage, QLinearGradient, QMovie, QPainter
+)
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import lan, mods, patches, paths, profile, updates
+from . import diagnostics, i18n, lan, mods, patches, paths, profile, updates
 from .core import Core, GT6_TITLES
+from .i18n import tr
 from .rpcs3 import RPCS3, STOCK_BUILD_WARNING, installed_version, is_patched_build
 
+# Game exit within this many seconds (code 0) with mods installed -> offer to uninstall them (#49).
+QUICK_EXIT_SECONDS = 60
 ACCENT = "#e0157a"
 STYLE = f"""
-* {{ color: #e9e9ee; font-size: 10pt; }}
+* {{ color: #e9e9ee; font-size: 10pt; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans CN", "PingFang SC", sans-serif; }}
 QMainWindow, QDialog, QMessageBox {{ background: #0b0b10; }}
 QTabWidget::pane {{ border: 1px solid rgba(255,255,255,0.08); background: rgba(10,10,14,0.86); border-radius: 8px; top: -1px; }}
 QTabBar::tab {{ background: transparent; padding: 9px 15px; color: #9a9aa6; border: none; font-weight: 600; }}
@@ -49,6 +56,7 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QLabel#muted {{ color: #9a9aa6; }}
 QLabel#warn {{ color: #ffb347; }}
 QLabel#ok {{ color: #6fdc8c; }}
+QLabel#update {{ color: #ffd27f; background: rgba(0,0,0,0.72); border: 1px solid #ffb347; border-radius: 6px; padding: 5px 8px; }}
 QSlider::groove:horizontal {{ height: 4px; background: rgba(255,255,255,0.15); border-radius: 2px; }}
 QSlider::handle:horizontal {{ width: 14px; margin: -6px 0; border-radius: 7px; background: {ACCENT}; }}
 QToolTip {{ background: #15151b; color: white; border: 1px solid #333; }}
@@ -150,6 +158,17 @@ def _on_gui(signal, fn: Callable, owner: QObject) -> "_Relay":
     return r
 
 
+class _UpdateCheck(QObject):
+    """Asks GitHub for a newer launcher release on a worker thread."""
+    found = Signal(object)
+
+    def start(self) -> None:
+        def run() -> None:
+            from . import selfupdate
+            self.found.emit(selfupdate.check())
+        threading.Thread(target=run, name="launcher-update-check", daemon=True).start()
+
+
 class Job(QObject):
     """Runs fn(job) on a worker thread. fn can call job.progress(label, done, total) and job.log()."""
     progressed = Signal(str, object, object)
@@ -184,6 +203,132 @@ class Job(QObject):
             self.failed.emit(f"{e}")
 
 
+# --------------------------------------------------------------------------- easter egg
+
+
+def play_sound(wav_path: str):
+    """Play a short sound effect asynchronously across Windows, Linux, and macOS."""
+    import shutil
+    if sys.platform == "win32":
+        try:
+            import winsound
+            winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return
+        except Exception:
+            pass
+    for cmd in ("pw-play", "paplay", "aplay", "ffplay", "mpv", "afplay"):
+        if shutil.which(cmd):
+            try:
+                args = [cmd]
+                if cmd == "ffplay":
+                    args += ["-nodisp", "-autoexit", "-loglevel", "quiet"]
+                elif cmd == "mpv":
+                    args += ["--no-video"]
+                args.append(wav_path)
+                return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+
+class EasterEggOverlay(QWidget):
+    """Pop-up animated character with transparent alpha background."""
+
+    def __init__(self, parent: QWidget, webp_path: str, wav_path: str, on_finished: Optional[Callable[[], None]] = None):
+        super().__init__(parent)
+        self._on_finished = on_finished
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setStyleSheet("background: transparent;")
+
+        self.lbl = QLabel(self)
+        self.lbl.setStyleSheet("background: transparent;")
+        self.lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.movie = QMovie(webp_path)
+        self.lbl.setMovie(self.movie)
+
+        w, h = 360, 300
+        self.resize(w, h)
+        self.lbl.resize(w, h)
+
+        parent_w = parent.width()
+        parent_h = parent.height()
+        target_x = max(0, parent_w - w - 16)
+        target_y = max(0, parent_h - h - 10)
+        start_y = parent_h + 10
+
+        self.move(target_x, start_y)
+        self.show()
+        self.raise_()
+
+        # Spring pop-up from bottom
+        self._anim = QPropertyAnimation(self, b"pos")
+        self._anim.setDuration(280)
+        self._anim.setStartValue(QPoint(target_x, start_y))
+        self._anim.setEndValue(QPoint(target_x, target_y))
+        self._anim.setEasingCurve(QEasingCurve.Type.OutBack)
+
+        play_sound(wav_path)
+        self.movie.start()
+        self._anim.start()
+
+        # Auto-dismiss smoothly when audio/video finishes (~4.5s)
+        QTimer.singleShot(4200, self._slide_down)
+
+    def _slide_down(self) -> None:
+        target_x = self.x()
+        start_y = self.y()
+        end_y = self.parentWidget().height() + 10
+        self._anim_down = QPropertyAnimation(self, b"pos")
+        self._anim_down.setDuration(320)
+        self._anim_down.setStartValue(QPoint(target_x, start_y))
+        self._anim_down.setEndValue(QPoint(target_x, end_y))
+        self._anim_down.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._anim_down.finished.connect(self._cleanup)
+        self._anim_down.start()
+
+    def _cleanup(self) -> None:
+        self.movie.stop()
+        if self._on_finished:
+            self._on_finished()
+        self.deleteLater()
+
+
+class _TabsEasterEggFilter(QObject):
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            bar = self.win.tabs.tabBar()
+            pos = event.pos()
+            corner_w = self.win.lang_btn.width() if hasattr(self.win, "lang_btn") else 110
+            if obj is bar:
+                last_idx = -1
+                for i in range(bar.count() - 1, -1, -1):
+                    if self.win.tabs.isTabVisible(i):
+                        last_idx = i
+                        break
+                if last_idx >= 0:
+                    tab_right = bar.tabRect(last_idx).right()
+                    # Trigger in the empty bar area between last tab and language button
+                    if tab_right < pos.x() < bar.width() - corner_w - 6:
+                        self.win._play_easter_egg()
+                        return True
+            elif obj is self.win.tabs:
+                last_idx = -1
+                for i in range(bar.count() - 1, -1, -1):
+                    if self.win.tabs.isTabVisible(i):
+                        last_idx = i
+                        break
+                tab_right = bar.tabRect(last_idx).right() if last_idx >= 0 else 0
+                if 0 <= pos.y() <= bar.height() + 8 and tab_right < pos.x() < self.win.tabs.width() - corner_w - 12:
+                    self.win._play_easter_egg()
+                    return True
+        return super().eventFilter(obj, event)
+
+
 # --------------------------------------------------------------------------- main window
 
 class MainWindow(QMainWindow):
@@ -199,6 +344,8 @@ class MainWindow(QMainWindow):
         self.job: Optional[Job] = None
         self.proc: Optional[subprocess.Popen] = None
         self._loading = False
+        self._hardware_warning_shown = False
+        self._last_direct_rpc_origin = ""
         self._patch_index: Optional[list] = None
 
         bg = Background(paths.resource("img/bg.png"))
@@ -219,6 +366,31 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_log(), "Log")
         root.addWidget(self.tabs, 6)
 
+        # Hidden easter egg button in empty space between Log tab and language corner button
+        self._egg_overlay: Optional[EasterEggOverlay] = None
+        self.egg_btn = QPushButton("", self.tabs)
+        self.egg_btn.setFixedSize(90, 32)
+        self.egg_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.egg_btn.setStyleSheet("background: transparent; border: none;")
+        self.egg_btn.setCursor(Qt.CursorShape.ArrowCursor)
+        self.egg_btn.clicked.connect(self._play_easter_egg)
+        self._egg_filter = _TabsEasterEggFilter(self)
+        self.tabs.installEventFilter(self._egg_filter)
+        self.tabs.tabBar().installEventFilter(self._egg_filter)
+
+        # Language switch button in the top-right corner of the tab bar
+        self.lang_btn = QPushButton(i18n.get_switch_button_label(self.s.ui_language))
+        self.lang_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lang_btn.setToolTip("Switch language / 切换语言 / Changer de langue / 言語を切り替え")
+        self.lang_btn.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); "
+            "border-radius: 6px; padding: 4px 10px; font-weight: 600; font-size: 9pt; color: #d6d6e2; margin-right: 6px; margin-top: 3px; } "
+            "QPushButton:hover { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.28); color: white; }"
+        )
+        self.lang_btn.clicked.connect(self._cycle_language)
+        self.tabs.setCornerWidget(self.lang_btn, Qt.Corner.TopRightCorner)
+
         self._logsig_holder = _LogBridge()
         self._logsig_holder.line.connect(self._append_log)
         for cb in self.findChildren(QComboBox):  # let long entries shrink instead of widening the page
@@ -230,11 +402,35 @@ class MainWindow(QMainWindow):
         self._load_settings_into_ui()
         self._fill_pads()
         self._update_wheel_label()
-        self.refresh()
+        self._record_original_texts()
+        if self.s.ui_language != "en":
+            self._retranslate_ui()
+        else:
+            self.refresh()
         self.poll = QTimer(self)
         self.poll.timeout.connect(self._poll_proc)
         self.poll.start(1000)
+        self._check_external_rpcs3_launch()
         QTimer.singleShot(200, self._first_run)
+        QTimer.singleShot(1500, self._start_update_check)
+
+    def _start_update_check(self) -> None:
+        self._update_check = _UpdateCheck(self)
+        self._update_relay = _on_gui(self._update_check.found, self._show_update, self)
+        self._update_check.start()
+
+    def _show_update(self, rel) -> None:
+        if not rel:
+            return
+        from html import escape
+        from . import __version__
+        kind = tr("beta") if rel.get("prerelease") else tr("release")
+        self.update_lbl.setText(
+            f'{tr("New launcher")} {kind} {escape(rel["tag"])} {tr("available")} - '
+            f'<a style="color:#ffffff; font-weight:700;" href="{escape(rel["url"], quote=True)}">{tr("Download")}</a>')
+        self.update_lbl.setToolTip(f'{tr("You have")} v{__version__}')
+        self.update_lbl.setVisible(True)
+        self._append_log(f"Launcher update available: {rel['tag']} (you have {__version__}) - {rel['url']}")
 
     # ------------------------------------------------------------------ left panel
     def _build_left(self) -> QWidget:
@@ -243,7 +439,14 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.addWidget(label("GRAN TURISMO 6", 26, True))
         from . import __version__
-        v.addWidget(label(f"PC edition  ·  v{__version__}", 11, False, "muted"))
+        self.version_lbl = label(f"{tr('PC edition  ·  v')}{__version__}", 11, False, "muted")
+        v.addWidget(self.version_lbl)
+        self.update_lbl = label("", 10, True, "update")
+        self.update_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self.update_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.update_lbl.setOpenExternalLinks(True)
+        self.update_lbl.setVisible(False)
+        v.addWidget(self.update_lbl)
         v.addStretch(1)
         self.game_box = QComboBox()
         self.game_box.currentIndexChanged.connect(self._on_game_changed)
@@ -335,20 +538,31 @@ class MainWindow(QMainWindow):
         b = QPushButton("Refresh")
         b.clicked.connect(lambda: (self._fill_pads(), self._update_wheel_label()))
         h.addWidget(b)
+        b = QPushButton("Keyboard keys")
+        b.clicked.connect(self.show_keyboard_keys)
+        h.addWidget(b)
         f.addLayout(h)
         self.pad_lbl = label("", 9, name="muted")
         f.addWidget(self.pad_lbl)
-        f.addWidget(label("Automatic uses the first detected gamepad (Xbox, PlayStation, 8BitDo, Switch Pro ...) "
+        f.addWidget(label("Automatic uses the first detected gamepad (Steam Deck, ROG Ally, Legion Go, MSI Claw, Xbox, PlayStation, 8BitDo...) "
                           "with standard button mapping; if none is detected, the current RPCS3 input setting is kept. "
                           "Choose Keyboard explicitly to switch to keyboard input. Racing-game style "
                           "triggers (RT accelerate, LT brake): in the game, Options -> Wireless Controller.", 9, name="muted"))
         h = QHBoxLayout()
-        self.wheel_chk = QCheckBox("Use racing wheel")
+        self.wheel_chk = QCheckBox(tr("Use racing wheel"))
         self.wheel_chk.toggled.connect(self._on_wheel_toggled)
         h.addWidget(self.wheel_chk)
-        b = QPushButton("Set up wheel...")
+        b = QPushButton(tr("Set up wheel..."))
         b.clicked.connect(self.setup_wheel)
         h.addWidget(b)
+        self.invert_pedals_btn = QPushButton(tr("Invert pedals"))
+        self.invert_pedals_btn.setToolTip(tr("Invert throttle, brake, and clutch pedal polarity if they act as pressed when released."))
+        self.invert_pedals_btn.clicked.connect(self.invert_pedals)
+        h.addWidget(self.invert_pedals_btn)
+        self.reverse_ffb_chk = QCheckBox(tr("Reverse FFB"))
+        self.reverse_ffb_chk.setToolTip(tr("Flip force feedback direction if the wheel snaps away from center or oscillates violently."))
+        self.reverse_ffb_chk.toggled.connect(self._on_reverse_ffb_toggled)
+        h.addWidget(self.reverse_ffb_chk)
         self.wheel_lbl = label("", 9, name="muted")
         h.addWidget(self.wheel_lbl, 1)
         f.addLayout(h)
@@ -394,24 +608,44 @@ class MainWindow(QMainWindow):
         pads = gamepad.list_gamepads()
         self._loading = True
         self.pad_box.clear()
-        self.pad_box.addItem("Automatic (first gamepad, else keyboard)", ("auto", ""))
+        self.pad_box.addItem(tr("Automatic (first gamepad, else keyboard)"), ("auto", ""))
         for p in pads or []:
-            self.pad_box.addItem(p, ("pad", p))
+            tag = f" 🎮 [{tr('Handheld')}]" if gamepad.is_handheld_controller(p) else ""
+            self.pad_box.addItem(f"{p}{tag}", ("pad", p))
         if self.s.controller_mode == "pad" and self.s.controller_device not in (pads or []):
-            self.pad_box.addItem(f"{self.s.controller_device} (not connected)", ("pad", self.s.controller_device))
-        self.pad_box.addItem("Keyboard", ("keyboard", ""))
+            self.pad_box.addItem(f"{self.s.controller_device} {tr('(not connected)')}", ("pad", self.s.controller_device))
+        self.pad_box.addItem(tr("Keyboard"), ("keyboard", ""))
         want = (self.s.controller_mode, self.s.controller_device if self.s.controller_mode == "pad" else "")
         for i in range(self.pad_box.count()):
             if tuple(self.pad_box.itemData(i)) == want:
                 self.pad_box.setCurrentIndex(i)
         self._loading = False
         if pads is None:
-            self.pad_lbl.setText("Gamepad detection unavailable (SDL3 library not found).")
+            self.pad_lbl.setText(tr("Gamepad detection unavailable (SDL3 library not found)."))
         elif not pads:
-            self.pad_lbl.setText("No gamepad connected. Connect it (8BitDo: X-input mode) and click Refresh."
-                                 if paths.IS_WINDOWS else "No gamepad connected.")
+            self.pad_lbl.setText(tr("No gamepad connected. Connect it (8BitDo: X-input mode) and click Refresh.")
+                                 if paths.IS_WINDOWS else tr("No gamepad connected."))
         else:
-            self.pad_lbl.setText(f"Connected: {', '.join(pads)}" if pads else "No gamepad connected.")
+            self.pad_lbl.setText(f"{tr('Connected:')} {', '.join(pads)}" if pads else tr("No gamepad connected."))
+
+    def show_keyboard_keys(self) -> None:
+        """Read-only table of the keyboard keys (#48); does not change any controller setting."""
+        from html import escape
+        from . import gamepad
+        active, rows = gamepad.keyboard_key_table()
+        body = "".join(f"<tr><td><b>{escape(key)}</b></td><td>{escape(tr(button))}</td><td>{escape(tr(action))}</td></tr>"
+                       for button, key, action in rows)
+        status = tr("Player 1 is set to Keyboard.") if active else \
+            tr("Player 1 is a gamepad now. These keys work when Player 1 is set to Keyboard (or Automatic finds no gamepad).")
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Keyboard keys"))
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(f"<p>{escape(status)}</p>"
+                    f"<table cellspacing='0' cellpadding='3'><tr><th align='left'>{escape(tr('Key'))}</th>"
+                    f"<th align='left'>{escape(tr('PS3 button'))}</th><th align='left'>{escape(tr('In GT6'))}</th></tr>"
+                    f"{body}</table>"
+                    f"<p>{escape(tr('Letter keys need a Latin keyboard layout (e.g. English). With a Cyrillic or Greek layout active, switch to English while playing.'))}</p>")
+        box.exec()
 
     def _on_pad_changed(self, _i) -> None:
         if self._loading:
@@ -422,14 +656,63 @@ class MainWindow(QMainWindow):
 
     def _update_wheel_label(self) -> None:
         m = self.s.wheel_mapping or {}
+        has_pedal_axes = any(
+            isinstance(m.get(k), dict) and m[k].get("type") == "axis" for k in ("throttle", "brake", "clutch")
+        )
+        if hasattr(self, "invert_pedals_btn"):
+            self.invert_pedals_btn.setEnabled(bool(has_pedal_axes))
         if m.get("steering"):
             n = len([k for k in m if m[k]])
-            self.wheel_lbl.setText(f"Set up: {self.s.wheel_name or 'wheel'} ({n} controls mapped)")
+            self.wheel_lbl.setText(f"{tr('Set up:')} {self.s.wheel_name or 'wheel'} ({n} controls mapped)")
         else:
-            self.wheel_lbl.setText("Not set up yet.")
+            self.wheel_lbl.setText(tr("Not set up yet."))
         self._loading = True
         self.wheel_chk.setChecked(bool(self.s.wheel_enabled and m.get("steering")))
+        if hasattr(self, "reverse_ffb_chk"):
+            self.reverse_ffb_chk.setEnabled(bool(m.get("steering")))
+            self.reverse_ffb_chk.setChecked(bool(self.s.wheel_reverse_ffb))
         self._loading = False
+
+    def invert_pedals(self) -> None:
+        """Flip the reverse flag for all mapped pedal axes to quickly resolve inverted pedals."""
+        m = self.s.wheel_mapping or {}
+        if not m:
+            QMessageBox.information(self, tr("Racing wheel"), tr("No wheel mapping found. Please set up your wheel first."))
+            return
+        flipped = []
+        for pedal in ("throttle", "brake", "clutch"):
+            if pedal in m and isinstance(m[pedal], dict) and m[pedal].get("type") == "axis":
+                m[pedal]["reverse"] = not m[pedal].get("reverse", False)
+                status = tr("Inverted") if m[pedal]["reverse"] else tr("Normal")
+                pedal_name = tr(pedal.capitalize())
+                flipped.append(f"{pedal_name}: {status}")
+        if not flipped:
+            QMessageBox.information(self, tr("Racing wheel"), tr("No pedal axes found to invert."))
+            return
+        self.s.wheel_mapping = m
+        self.core.save()
+        on = bool(self.s.wheel_enabled and m.get("steering"))
+        from . import gamepad
+        gamepad.write_g27_config(m, on, ffb_device=int(m["steering"]["device_type_id"]) if on else 0,
+                                 reverse_effects=self.s.wheel_reverse_ffb)
+        self._update_wheel_label()
+        QMessageBox.information(
+            self,
+            tr("Racing wheel"),
+            tr("Pedal polarity updated:\n\n") + "\n".join(f"• {x}" for x in flipped)
+        )
+
+    def _on_reverse_ffb_toggled(self, on: bool) -> None:
+        if self._loading:
+            return
+        self.s.wheel_reverse_ffb = on
+        self.core.save()
+        m = self.s.wheel_mapping or {}
+        if m.get("steering"):
+            from . import gamepad
+            enabled = bool(self.s.wheel_enabled)
+            gamepad.write_g27_config(m, enabled, ffb_device=int(m["steering"]["device_type_id"]) if enabled else 0,
+                                     reverse_effects=on)
 
     def _on_wheel_toggled(self, on: bool) -> None:
         if self._loading:
@@ -501,10 +784,27 @@ class MainWindow(QMainWindow):
         f.addRow("Aspect ratio", self.ctl["aspect"])
         self.ctl["output_resolution"] = self._combo(profile.OUTPUT_RESOLUTIONS, "output_resolution")
         f.addRow("PS3 output", self.ctl["output_resolution"])
-        b = QPushButton("Handheld 800p preset (Steam Deck / 1280x800)")
-        b.setToolTip("720p output, 16:10 aspect, 100 % + FSR upscaling to the 800p screen, lighter effects.")
-        b.clicked.connect(self.apply_handheld_preset)
-        f.addRow("", b)
+        opt_row = QHBoxLayout()
+        self.auto_opt_btn = QPushButton("⚡ Auto-configure for my PC")
+        self.auto_opt_btn.setToolTip(
+            "Automatically detects your CPU, GPU, and RAM to set optimal graphics and emulation settings.")
+        self.auto_opt_btn.clicked.connect(self.auto_configure_hardware)
+        opt_row.addWidget(self.auto_opt_btn, 1)
+
+        self.restore_opt_btn = QPushButton("Restore previous settings")
+        self.restore_opt_btn.setToolTip(
+            "Restore the settings you had before running auto-configuration.")
+        self.restore_opt_btn.clicked.connect(self.restore_previous_settings)
+        opt_row.addWidget(self.restore_opt_btn, 1)
+        f.addRow("Presets", opt_row)
+
+        self.handheld_preset_btn = QPushButton()
+        self.handheld_preset_btn.setToolTip(
+            "Apply the 800p handheld graphics preset. Press again to restore the graphics settings you had before.")
+        self.handheld_preset_btn.clicked.connect(self.apply_handheld_preset)
+        self._update_handheld_preset_button()
+        self._update_auto_opt_buttons()
+        f.addRow("", self.handheld_preset_btn)
         self.ctl["shadows"] = self._combo(profile.SHADOWS, "shadows")
         f.addRow("Shadows", self.ctl["shadows"])
         self.ctl["motion_blur"] = self._combo(profile.MOTION_BLUR, "motion_blur")
@@ -562,19 +862,44 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Emulation")
         f = QFormLayout(g)
         self.ctl["gpu_adapter"] = QComboBox()
-        self.ctl["gpu_adapter"].currentIndexChanged.connect(lambda _i: self._set("gpu_adapter", self.ctl["gpu_adapter"].currentData() or ""))
+        self.ctl["gpu_adapter"].currentIndexChanged.connect(self._on_gpu_adapter_changed)
         f.addRow("GPU", self.ctl["gpu_adapter"])
+        self.gpu_vram_warn = QLabel()
+        self.gpu_vram_warn.setWordWrap(True)
+        self.gpu_vram_warn.setVisible(False)
+        restyle(self.gpu_vram_warn, "warn")
+        f.addRow("", self.gpu_vram_warn)
+        self.ctl["audio_format"] = self._combo(
+            {"Stereo": "Stereo (2.0)", "Surround 5.1": "Surround 5.1"}, "audio_format")
+        self.ctl["audio_format"].setToolTip(
+            "5.1 requires a six-channel output device and operating-system speaker setup.")
+        f.addRow("Audio output", self.ctl["audio_format"])
         self.ctl["render_path"] = self._combo(profile.RENDER_PATHS, "render_path")
         f.addRow("Render path", self.ctl["render_path"])
+        ram_gb = profile.detect_system_ram_gb()
+        ram_hint = f"Detected {ram_gb:.0f} GB RAM ({'Mega' if ram_gb >= 7.0 else 'Safe'} recommended). Changing recompiles SPU cache."
         self.ctl["spu_block_size"] = self._combo(profile.SPU_BLOCK, "spu_block_size")
-        self.ctl["spu_block_size"].setToolTip("Changing this recompiles all SPU code on the next start (several minutes).")
+        self.ctl["spu_block_size"].setToolTip(
+            "Mega provides optimal performance and frame pacing for GT6 on systems with >= 8 GB RAM.\n"
+            "Safe uses less compiler memory for systems under 8 GB RAM.\n"
+            "Giga can cause thread deadlocks and audio desyncs in GT6."
+        )
         f.addRow("SPU block size", self.ctl["spu_block_size"])
-        f.addRow("", label("Changing SPU block size triggers a full SPU recompile on the next start.", 9, name="muted"))
+        f.addRow("", label(ram_hint, 9, name="muted"))
         self.ctl["thread_scheduler"] = self._combo(profile.SCHEDULERS, "thread_scheduler")
         f.addRow("Thread scheduler", self.ctl["thread_scheduler"])
+        self.ctl["zcull_accuracy"] = self._combo(profile.ZCULL_ACCURACY, "zcull_accuracy")
+        self.ctl["zcull_accuracy"].setToolTip(
+            "Approximate is the standard fast default.\n"
+            "Relaxed can resolve specific occlusion stalls.\n"
+            "Precise forces exact PS3 occlusion query calculations, eliminating residual car or shadow flickering."
+        )
+        f.addRow("ZCULL accuracy", self.ctl["zcull_accuracy"])
         for key, txt, tip in (
             ("zcull_queries_disabled", "Disable ZCull occlusion queries",
-             "Fixes reward-screen slowdowns and Garage car-image softlocks; may crackle audio in bumper cam."),
+             "Recommended - keep this on. Fixes 1-5 fps on the car delivery and part install screens and Garage car-image softlocks. Unticking it does not stop cars flickering on tracks like London. May crackle audio in bumper cam."),
+            ("strict_rendering", "Strict rendering mode",
+             "Forces strict pipeline synchronization for render targets. Fixes hood reflections showing previous frames (e.g. Ford Focus ST) and Racing Gear menu flickering, especially on AMD GPUs."),
             ("accurate_rsx_reservation", "Accurate RSX reservation access", "Fewer RSX desyncs (recommended)."),
             ("multithreaded_rsx", "Multithreaded RSX", "Causes vertex explosions on cars in GT6 - keep off."),
             ("handle_tiled_memory", "Handle RSX memory tiling",
@@ -729,6 +1054,9 @@ class MainWindow(QMainWindow):
         f.addLayout(h)
         f.addWidget(label("Every file a mod overwrites is backed up, so uninstalling restores the game exactly. "
                           "Start a new save when you first use the Career mod.", 9, name="muted"))
+        f.addWidget(label("Experimental: these mods do not work on every PC. If the game closes by itself right "
+                          "after starting, click 'Uninstall all mods' - the launcher also offers this automatically.",
+                          9, name="muted"))
         v.addWidget(g)
         g = QGroupBox("Cheats (single player)")
         f = QVBoxLayout(g)
@@ -856,7 +1184,17 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("monospace", 9))
-        return self.log_view
+        w = QWidget()
+        v = QVBoxLayout(w)
+        actions = QHBoxLayout()
+        save = QPushButton("Save current logs")
+        save.setToolTip("Save the current session's launcher and RPCS3 logs to a folder for bug reports.")
+        save.clicked.connect(self._save_logs)
+        actions.addWidget(save)
+        actions.addStretch(1)
+        v.addLayout(actions)
+        v.addWidget(self.log_view)
+        return w
 
     # ------------------------------------------------------------------ logging
     def _log_threadsafe(self, s: str) -> None:
@@ -868,6 +1206,34 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, s: str) -> None:
         self.log_view.appendPlainText(s.rstrip())
+
+    def _save_logs(self) -> None:
+        from datetime import datetime
+        base_dir = next((d for d in (os.path.expanduser("~/Desktop"), os.path.expanduser("~/Downloads"),
+                                     os.path.expanduser("~")) if os.path.isdir(d)), os.path.expanduser("~"))
+        default_name = f"gt6-logs-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        dest, _ = QFileDialog.getSaveFileName(
+            self, tr("Save current logs"), os.path.join(base_dir, default_name), "Zip archive (*.zip)"
+        )
+        if not dest:
+            return
+        try:
+            zip_path, has_rpcs3 = diagnostics.save_logs_archive(
+                dest, self.log_view.toPlainText(), settings=self.s, entry=self.current()
+            )
+        except OSError as e:
+            QMessageBox.warning(self, tr("Save current logs"), f"{tr('Could not save logs:')} {e}")
+            return
+        included = "system-info.txt + launcher.log + RPCS3.log" if has_rpcs3 else "system-info.txt + launcher.log"
+        box = QMessageBox(QMessageBox.Icon.Information, tr("Save current logs"),
+                          f"{tr('Logs saved to:')}\n{zip_path}\n\n({included})",
+                          QMessageBox.StandardButton.Ok, self)
+        open_btn = box.addButton(tr("Open folder"), QMessageBox.ButtonRole.ActionRole)
+        box.exec()
+        if box.clickedButton() == open_btn:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(os.path.abspath(zip_path))))
+        else:
+            self._append_log("[logs saved] RPCS3 log was not available")
 
     # ------------------------------------------------------------------ settings binding
     def _set(self, key: str, value) -> None:
@@ -884,6 +1250,106 @@ class MainWindow(QMainWindow):
         if key in ("aa", "aspect", "motion_blur", "depth_of_field", "shadows", "lamp_glare", "unlock_menu_fps",
                    "resolution_scale", "lan_enabled", "online_enabled", "dev_menu", "engine_color", "head_motion")                 or key.startswith(("fov_", "cge_", "hm_")):
             self._fill_patch_list()
+
+    def _on_gpu_adapter_changed(self, _i: int = 0) -> None:
+        if self._loading:
+            return
+        adapter = self.ctl["gpu_adapter"].currentData() or ""
+        self._set("gpu_adapter", adapter)
+        self._update_gpu_warning(adapter)
+
+    def _update_gpu_warning(self, adapter: str) -> None:
+        if not hasattr(self, "gpu_vram_warn"):
+            return
+        effective = adapter
+        if not effective:
+            adapters = self.core.gpu_adapters()
+            effective = adapters[0] if adapters else ""
+        if not effective:
+            self.gpu_vram_warn.setVisible(False)
+            return
+
+        is_low, msg = self.core.check_gpu_low_vram(effective)
+        if is_low and msg:
+            self.gpu_vram_warn.setText(f"⚠ {msg}")
+            self.gpu_vram_warn.setVisible(True)
+        else:
+            self.gpu_vram_warn.setVisible(False)
+
+    def _record_original_texts(self) -> None:
+        """Stores the original English text for all UI elements so translation is lossless."""
+        for gb in self.findChildren(QGroupBox):
+            if not gb.property("orig_text"):
+                gb.setProperty("orig_text", gb.title())
+        for typ in (QPushButton, QCheckBox, QLabel):
+            for w in self.findChildren(typ):
+                if w is getattr(self, "lang_btn", None) or w is getattr(self, "egg_btn", None):
+                    continue
+                txt = w.text()
+                if txt and not w.property("orig_text"):
+                    w.setProperty("orig_text", txt)
+
+    def _cycle_language(self) -> None:
+        next_code, _ = i18n.next_language(self.s.ui_language)
+        self.s.ui_language = next_code
+        i18n.set_current_language(next_code)
+        self.lang_btn.setText(i18n.get_switch_button_label(next_code))
+        self._save_soon()
+        self._retranslate_ui()
+
+    def _lang_label(self, code: str) -> str:
+        return i18n.get_switch_button_label(code)
+
+    def _retranslate_ui(self) -> None:
+        lang = self.s.ui_language
+        i18n.set_current_language(lang)
+        if hasattr(self, "lang_btn"):
+            self.lang_btn.setText(i18n.get_switch_button_label(lang))
+            self.lang_btn.setToolTip(f"{i18n.tr('Switch language', lang)} -> {i18n.get_switch_button_label(lang)}")
+
+        # Re-translate group boxes
+        for gb in self.findChildren(QGroupBox):
+            orig = gb.property("orig_text")
+            if orig:
+                gb.setTitle(i18n.tr(orig, lang))
+
+        # Re-translate buttons and checkboxes (excluding easter egg button)
+        for typ in (QPushButton, QCheckBox):
+            for btn in self.findChildren(typ):
+                if btn is getattr(self, "lang_btn", None) or btn is getattr(self, "egg_btn", None):
+                    continue
+                orig = btn.property("orig_text")
+                if orig:
+                    btn.setText(i18n.tr(orig, lang))
+
+        # Re-translate static labels
+        for lbl in self.findChildren(QLabel):
+            orig = lbl.property("orig_text")
+            if orig:
+                lbl.setText(i18n.tr(orig, lang))
+
+        # Tab titles
+        tab_keys = ["Setup", "Graphics", "Patches", "Mods", "LAN", "Advanced", "Log"]
+        for idx, key in enumerate(tab_keys):
+            if idx < self.tabs.count():
+                self.tabs.setTabText(idx, i18n.tr(key, lang))
+
+        # Log tab is hidden when Chinese is selected
+        if self.tabs.count() > 6:
+            self.tabs.setTabVisible(6, lang != "zh_CN")
+            if lang == "zh_CN" and self.tabs.currentIndex() == 6:
+                self.tabs.setCurrentIndex(0)
+
+        # Subheader and Play button
+        from . import __version__
+        if hasattr(self, "version_lbl"):
+            self.version_lbl.setText(f"{i18n.tr('PC edition  ·  v', lang)}{__version__}")
+        if hasattr(self, "play_btn") and self.job is None and self.proc is None:
+            self.play_btn.setText(i18n.tr("PLAY", lang))
+
+        self._fill_pads()
+        self._update_wheel_label()
+        self.refresh()
 
     def _save_soon(self) -> None:
         """Coalesce rapid changes (slider drags) into one settings write."""
@@ -922,43 +1388,126 @@ class MainWindow(QMainWindow):
         finally:
             self._loading = False
         self._update_hints()
+        self._update_auto_opt_buttons()
 
     def _update_hints(self) -> None:
         hints = []
-        if self.s.aa == "off" and self.s.resolution_scale < 200:
-            hints.append("No post AA: use 200% or more resolution, otherwise edges will shimmer.")
+        if self.s.render_path == "cpu_blit" and self.s.resolution_scale > 100:
+            hints.append(tr("Force CPU Blit: resolution scale above 100% causes a green edge band. Keep resolution scale at 100% and use FSR upscaling."))
+        elif self.s.render_path != "cpu_blit" and self.s.aa == "off" and self.s.resolution_scale < 200:
+            hints.append(tr("No post AA: use 200% or more resolution, otherwise edges will shimmer."))
+        if self.s.aa == "off":
+            hints.append(tr("No post AA skips GT6's whole post-process pass, not just MLAA: clouds and sky "
+                            "gradients can show colour banding. Use Sharper MLAA for the original look."))
         if self.s.resolution_scale > 100 and self.s.motion_blur.startswith("gameplay"):
-            hints.append("Known issue: motion blur can flash green/magenta above 100% resolution.")
+            hints.append(tr("Known issue: motion blur can flash green/magenta above 100% resolution."))
         entry = self.current()
         cb, blit = profile.render_flags(self.s, entry.installed if entry else None)
+        if blit and not cb:
+            hints.append(tr("Force CPU Blit: cars bought or repainted in this mode get a black picture in the "
+                            "garage list, and the Paint / Pit Service previews stay black. Races are not affected. "
+                            "To fix a car's picture, repaint it once with Render path set to Automatic."))
         if cb and self.s.resolution_scale >= 250:
-            hints.append("Heavy: 250-300% with color buffers (needed on 1.22) can drop FPS and make the audio "
-                         "crackle. 100-150% is recommended for a steady 60 FPS.")
+            hints.append(tr("Heavy: 250-300% with color buffers (needed on 1.22) can drop FPS and make the audio "
+                            "crackle. 100-150% is recommended for a steady 60 FPS."))
         if cb and self.s.resolution_scale > 100:
-            hints.append("Color buffers are on (1.06+): resolution scaling relies on AlexHaust's res-scale fix "
-                         "patches (enabled automatically); the game renders 1440x1080 internally at 100%.")
+            hints.append(tr("Color buffers are on (1.06+): resolution scaling relies on AlexHaust's res-scale fix "
+                            "patches (enabled automatically); the game renders 1440x1080 internally at 100%."))
         if self.s.aspect != "16:9":
-            hints.append("Ultrawide: 3D view is widened, HUD and menus stay 16:9.")
+            hints.append(tr("Ultrawide: 3D view is widened, HUD and menus stay 16:9."))
         self.gfx_hint.setText("\n".join(hints))
         self.ctl["cas_sharpening"].setEnabled(self.s.upscaler == "fsr")
 
-    def apply_handheld_preset(self) -> None:
-        for k, v in profile.HANDHELD_PRESET.items():
+    AUTO_OPT_BACKUP_KEY = "auto_opt_backup"
+
+    def auto_configure_hardware(self) -> None:
+        """Detect CPU, GPU, and RAM, optimize settings for GT6, and provide revert option."""
+        # Save snapshot of current settings before optimizing
+        self.core.data[self.AUTO_OPT_BACKUP_KEY] = self.s.to_dict()
+
+        cpu_info = profile.detect_cpu_info()
+        ram_gb = profile.detect_system_ram_gb()
+        adapter = self.s.gpu_adapter
+        if not adapter:
+            adapters = self.core.gpu_adapters()
+            adapter = adapters[0] if adapters else profile.detect_gpu_name()
+
+        recommended, summary = profile.recommend_settings_for_hardware(cpu_info, adapter, ram_gb)
+        for k, v in recommended.items():
             setattr(self.s, k, v)
+
         self.core.save()
         self._load_settings_into_ui()
+        self._update_auto_opt_buttons()
         self._fill_patch_list()
+
+        summary_txt = "\n".join(f"• {item}" for item in summary)
+        QMessageBox.information(
+            self,
+            tr("Hardware Auto-Configuration"),
+            tr("Optimal settings have been applied based on your detected hardware:\n\n")
+            + summary_txt
+            + tr("\n\n(You can click 'Restore previous settings' anytime to revert.)")
+        )
+
+    def restore_previous_settings(self) -> None:
+        """Restore settings backed up before the last auto-configuration."""
+        backup = self.core.data.pop(self.AUTO_OPT_BACKUP_KEY, None)
+        if not backup or not isinstance(backup, dict):
+            QMessageBox.information(self, tr("Restore Settings"), tr("No previous settings backup was found."))
+            return
+        self.core.settings = self.s = profile.Settings.from_dict(backup)
+        self.core.save()
+        self._load_settings_into_ui()
+        self._update_auto_opt_buttons()
+        self._fill_patch_list()
+        QMessageBox.information(self, tr("Restore Settings"), tr("Your previous settings have been restored."))
+
+    def _update_auto_opt_buttons(self) -> None:
+        if hasattr(self, "restore_opt_btn"):
+            has_backup = bool(self.core.data.get(self.AUTO_OPT_BACKUP_KEY))
+            self.restore_opt_btn.setEnabled(has_backup)
+
+    def apply_handheld_preset(self) -> None:
+        previous = self.core.data.get(self.HANDHELD_RESTORE_KEY)
+        if isinstance(previous, dict) and previous:
+            for key in profile.HANDHELD_PRESET:
+                if key in previous:
+                    setattr(self.s, key, previous[key])
+            self.core.data.pop(self.HANDHELD_RESTORE_KEY, None)
+        else:
+            self.core.data[self.HANDHELD_RESTORE_KEY] = {
+                key: getattr(self.s, key) for key in profile.HANDHELD_PRESET
+            }
+            for key, value in profile.HANDHELD_PRESET.items():
+                setattr(self.s, key, value)
+        self.core.save()
+        self._load_settings_into_ui()
+        self._update_handheld_preset_button()
+        self._fill_patch_list()
+
+    HANDHELD_RESTORE_KEY = "handheld_preset_restore"
+
+    def _update_handheld_preset_button(self) -> None:
+        if hasattr(self, "handheld_preset_btn"):
+            active = bool(self.core.data.get(self.HANDHELD_RESTORE_KEY))
+            self.handheld_preset_btn.setText(
+                tr("Restore previous graphics settings") if active else tr("Handheld 800p preset (Steam Deck / 1280x800)"))
 
     # settings that 'Reset to recommended' (graphics / emulation) must not touch
     RESET_KEEP = ("lan_enabled", "lan_bind_address", "online_enabled", "extra_patches", "gpu_adapter",
-                  "controller_mode", "controller_device", "wheel_enabled", "wheel_name", "wheel_mapping",
-                  "console_language", "dev_menu", "fullscreen")
+                  "controller_mode", "controller_device", "wheel_enabled", "wheel_name", "wheel_mapping", "wheel_reverse_ffb",
+                  "console_language", "ui_language", "dev_menu", "fullscreen", "audio_format")
 
     def reset_profile(self) -> None:
+        self.core.data.pop(self.HANDHELD_RESTORE_KEY, None)
+        self.core.data.pop(self.AUTO_OPT_BACKUP_KEY, None)
         keep = {k: getattr(self.s, k) for k in self.RESET_KEEP}
         self.core.settings = self.s = profile.Settings.from_dict(keep)
         self.core.save()
         self._load_settings_into_ui()
+        self._update_handheld_preset_button()
+        self._update_auto_opt_buttons()
         self._fill_pads()
         self._update_wheel_label()
         self._fill_patch_list()
@@ -984,20 +1533,20 @@ class MainWindow(QMainWindow):
         if rp_path:
             self.build_lbl.setText("" if is_patched_build(rp_path) else STOCK_BUILD_WARNING)
         else:
-            self.build_lbl.setText("Emulator component missing - reinstall the launcher." if not paths.IS_WINDOWS
-                                   else "Preparing the emulator component...")
+            self.build_lbl.setText(tr("Emulator component missing - reinstall the launcher.") if not paths.IS_WINDOWS
+                                   else tr("Preparing the emulator component..."))
         fw_ok = bool(rp_path) and RPCS3(rp_path).firmware_installed()
         if fw_ok:
-            self.fw_lbl.setText(f"Installed (version {RPCS3(rp_path).firmware_version() or '?'})")
+            self.fw_lbl.setText(f"{tr('Installed')} (version {RPCS3(rp_path).firmware_version() or '?'})")
             restyle(self.fw_lbl, "ok")
-            self.fw_btn.setText("Reinstall firmware")
+            self.fw_btn.setText(tr("Reinstall firmware"))
             restyle(self.fw_btn, "")
         else:
-            self.fw_lbl.setText("Not installed")
+            self.fw_lbl.setText(tr("Not installed"))
             restyle(self.fw_lbl, "warn")
-            self.fw_btn.setText("Install firmware")
+            self.fw_btn.setText(tr("Install firmware"))
             restyle(self.fw_btn, "accent")
-        self.games_lbl.setText(wrap_path("\n".join(f"{g.label}: {g.image.path}" for g in games)) or "No game added yet.")
+        self.games_lbl.setText(wrap_path("\n".join(f"{g.label}: {g.image.path}" for g in games)) or tr("No game added yet."))
         restyle(self.games_lbl, "ok" if games else "warn")
 
         # updates
@@ -1031,12 +1580,17 @@ class MainWindow(QMainWindow):
             staged = [m.name for m in mods.KNOWN_MODS if mods.staged(m.id)]
             lines = [f"Imported: {', '.join(staged) or 'nothing yet'}",
                      f"Installed: {', '.join(mods.mod_by_id(m).name for m in stack) or 'none'}"]
+            data_ready = mods.game_data_ready(entry.title_id)
             if entry.installed != "01.22":
                 lines.append("Needs game version 1.22.")
-            elif not mods.game_data_ready(entry.title_id):
+                self.mod_install_btn.setToolTip("Gran Turismo 6 must be updated to version 1.22 to use mods.")
+            elif not data_ready:
                 lines.append("Start the game once (update data is unpacked on first boot), then install.")
+                self.mod_install_btn.setToolTip("Start the game once on version 1.22 so it can unpack its update data before installing mods.")
+            else:
+                self.mod_install_btn.setToolTip("")
             self.mod_lbl.setText("\n".join(lines))
-            self.mod_install_btn.setEnabled(bool(staged) and entry.installed == "01.22" and not stack)
+            self.mod_install_btn.setEnabled(bool(staged) and entry.installed == "01.22" and data_ready and not stack)
             self.mod_remove_btn.setEnabled(bool(stack))
         readme = os.path.join(paths.mods_dir(), "ReadMe - IMPORTANT.txt")
         if os.path.exists(readme) and not self.mod_readme.toPlainText():
@@ -1070,10 +1624,11 @@ class MainWindow(QMainWindow):
             gp.addItem(a, a)
         gp.setCurrentIndex(max(gp.findData(self.s.gpu_adapter), 0))
         self._loading = False
+        self._update_gpu_warning(self.s.gpu_adapter)
 
         # left status
         if not entry:
-            st = "Add your Gran Turismo 6 disc image in Setup."
+            st = tr("Add your Gran Turismo 6 disc image in Setup.")
         else:
             st = (f"{entry.image.title}  -  {GT6_TITLES.get(entry.title_id, '')}\n"
                   f"Version {entry.installed or '01.00 (no updates)'}")
@@ -1086,7 +1641,7 @@ class MainWindow(QMainWindow):
         ready = bool(entry) and fw_ok and bool(rp_path)
         busy = self.job is not None
         self.play_btn.setEnabled(ready and not busy and self.proc is None)
-        self.play_btn.setText("RUNNING" if self.proc else "PLAY")
+        self.play_btn.setText(tr("RUNNING") if self.proc else tr("PLAY"))
         self._fill_patch_list()
 
     def _on_game_changed(self, _i) -> None:
@@ -1424,6 +1979,12 @@ class MainWindow(QMainWindow):
         entry = self.current()
         if not entry:
             return
+        if not mods.game_data_ready(entry.title_id):
+            QMessageBox.warning(self, "Game not ready",
+                                "Start the game once on version 1.22 and wait for the main menu.\n\n"
+                                "Gran Turismo 6 unpacks its update data on the first boot (~20 mins). "
+                                "Mods can only be installed after this step completes.")
+            return
 
         def work(job):
             n = 0
@@ -1433,8 +1994,8 @@ class MainWindow(QMainWindow):
             return n
         self._run("Install mods", work, lambda n: self._append_log(f"installed {n} mod files"))
 
-    def uninstall_mods(self) -> None:
-        entry = self.current()
+    def uninstall_mods(self, entry=None) -> None:
+        entry = entry or self.current()
         if not entry:
             return
 
@@ -1449,7 +2010,7 @@ class MainWindow(QMainWindow):
         entry = self.current()
         if entry:
             names = self.core.prepare(entry)
-            QMessageBox.information(self, "Config", f"Written. Enabled patches:\n" + "\n".join(names))
+            QMessageBox.information(self, "Config", "Written. Enabled patches:\n" + "\n".join(names))
 
     def reset_game_data(self) -> None:
         entry = self.current()
@@ -1484,6 +2045,8 @@ class MainWindow(QMainWindow):
                 self, "No updates", "The game has no updates installed (version 1.00). Start anyway?") \
                 != QMessageBox.StandardButton.Yes:
             return
+        if not self._confirm_hardware():
+            return
         if self.core.needs_compile(entry):
             box = QMessageBox(self)
             box.setWindowTitle("First start")
@@ -1493,6 +2056,7 @@ class MainWindow(QMainWindow):
             if box.exec() != QMessageBox.StandardButton.Ok:
                 return
         try:
+            self._proc_log_start_line = len(self.log_view.toPlainText().splitlines())
             self.proc = self.core.launch(entry)
             self._proc_entry = entry
             self._proc_started = __import__("time").time()
@@ -1502,10 +2066,67 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Start", str(e))
         self.refresh()
 
+    def _confirm_hardware(self) -> bool:
+        if self._hardware_warning_shown:
+            return True
+        warnings = self.core.hardware_advisory()
+        if not warnings:
+            return True
+        self._hardware_warning_shown = True
+        output = self.s.output_resolution.split("x")
+        if len(output) == 2 and all(part.isdigit() for part in output):
+            width = int(int(output[0]) * self.s.resolution_scale / 100)
+            height = int(int(output[1]) * self.s.resolution_scale / 100)
+            render_target = tr("Current internal target: approximately {w}x{h} ({scale}%).").format(
+                w=width, h=height, scale=self.s.resolution_scale)
+        else:
+            render_target = tr("Current resolution scale: {scale}%.").format(scale=self.s.resolution_scale)
+        adapters = self.core.gpu_adapters()
+        gpu = ", ".join(adapters) if adapters else tr("not identified in an RPCS3 log yet")
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Hardware may struggle with GT6"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(tr("This PC may struggle to run Gran Turismo 6 smoothly."))
+        box.setInformativeText("\n".join(warnings) + "\n" + tr("Detected Vulkan GPU: {gpu}").format(gpu=gpu)
+                               + f"\n{render_target}\n\n"
+                               + tr("Lowering the output resolution or internal resolution scale may help. "
+                                    "This is an advisory only; you can continue if you want to try."))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText(tr("Continue"))
+        box.button(QMessageBox.StandardButton.Cancel).setText(tr("Cancel"))
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _check_external_rpcs3_launch(self) -> None:
+        try:
+            marker = diagnostics.direct_rpcs3_launch_marker()
+        except OSError:
+            return
+        if marker and marker != self._last_direct_rpc_origin:
+            self._last_direct_rpc_origin = marker
+            diagnostics.record_direct_rpcs3_launch(marker)
+            self._append_log(f"[diagnostic] {marker}")
+
     def _poll_proc(self) -> None:
+        self._check_external_rpcs3_launch()
         if self.proc and self.proc.poll() is not None:
-            self._append_log(f"game exited (code {self.proc.returncode})")
-            if __import__("time").time() - getattr(self, "_proc_started", 0) > 180:
+            proc = self.proc
+            self._append_log(f"game exited (code {proc.returncode})")
+            lines = self.log_view.toPlainText().splitlines()
+            start = getattr(self, "_proc_log_start_line", 0)
+            try:
+                if not diagnostics.remember_last_session("\n".join(lines[start:])):
+                    self._append_log("[session log] RPCS3 log could not be snapshotted")
+            except OSError as e:
+                self._append_log(f"[session log] snapshot failed: {e}")
+            if proc.returncode != 0:
+                try:
+                    report = diagnostics.collect_crash(
+                        self._proc_entry, proc, self._proc_started, self.core.rpcs3_path() or "(unknown)")
+                    self._append_log(f"[abnormal exit] diagnostic report saved: {report}")
+                except Exception as e:  # noqa: BLE001
+                    self._append_log(f"[diagnostics failed] could not save crash report: {e}")
+            ran_for = __import__("time").time() - getattr(self, "_proc_started", 0)
+            if ran_for > 180:
                 self.core.mark_compiled(self._proc_entry)
             try:
                 if self.core.sync_ingame_color_grading(self._proc_entry.title_id):
@@ -1515,6 +2136,31 @@ class MainWindow(QMainWindow):
                 self._append_log(traceback.format_exc())
             self.proc = None
             self.refresh()
+            entry = self._proc_entry
+            if proc.returncode == 0 and entry and mods.installed_stack(entry.title_id):
+                # Time the game itself ran, not RPCS3's start-up/compile time (#53: 74 s total, 4 s of game)
+                game_ran = diagnostics.game_run_seconds()
+                quick = game_ran if game_ran is not None and game_ran < QUICK_EXIT_SECONDS else (
+                    ran_for if ran_for < QUICK_EXIT_SECONDS else None)
+                if quick is not None:
+                    QTimer.singleShot(0, lambda: self._offer_mod_uninstall(entry, quick))
+
+    def _offer_mod_uninstall(self, entry, ran_for: float) -> None:
+        """The game closed by itself within seconds while mods are installed (issue #49): on some PCs the
+        Spec II / Career mod files make GT6 quit right after boot. Offer the one-click restore."""
+        self._append_log(f"[mods] game closed after {ran_for:.0f} s with mods installed - offering uninstall")
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Game closed right after starting"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(tr("Gran Turismo 6 closed by itself right after starting."))
+        box.setInformativeText(tr("Mods are installed, and on some PCs the mods make the game close at start-up.\n\n"
+                               "Uninstall all mods now? The original game files are restored exactly and your "
+                               "save data is not touched. You can install the mods again later from the Mods tab."))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText(tr("Uninstall mods"))
+        box.button(QMessageBox.StandardButton.No).setText(tr("Keep mods"))
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            self.uninstall_mods(entry)
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -1535,6 +2181,34 @@ class MainWindow(QMainWindow):
                 self.thread.wait(3000)
         super().closeEvent(e)
 
+    def _update_egg_btn_pos(self) -> None:
+        if hasattr(self, "egg_btn") and hasattr(self, "tabs"):
+            bar = self.tabs.tabBar()
+            last_idx = -1
+            for i in range(bar.count() - 1, -1, -1):
+                if self.tabs.isTabVisible(i):
+                    last_idx = i
+                    break
+            if last_idx >= 0:
+                rect = bar.tabRect(last_idx)
+                bar_pos = bar.pos()
+                self.egg_btn.move(bar_pos.x() + rect.right() + 2, bar_pos.y() + rect.top())
+                self.egg_btn.show()
+                self.egg_btn.raise_()
+
+    def _play_easter_egg(self) -> None:
+        if getattr(self, "_egg_overlay", None) is not None:
+            return
+        webp = paths.resource("easteregg/dingdong.webp")
+        wav = paths.resource("easteregg/dingdong.wav")
+        if not os.path.exists(webp) or not os.path.exists(wav):
+            return
+
+        def done():
+            self._egg_overlay = None
+
+        self._egg_overlay = EasterEggOverlay(self, webp, wav, on_finished=done)
+
 
 class WheelWizard(QDialog):
     """Records a wheel mapping: one control at a time, by moving/pressing it."""
@@ -1552,12 +2226,12 @@ class WheelWizard(QDialog):
         ("triangle", "Press the button you want as  /\\  (Triangle).", "button", True),
         ("pause", "Press the button you want as START (pause menu).", "button", False),
         ("select", "Press the button you want as SELECT (change view).", "button", True),
-        ("up", "Press D-pad UP.", "button", True),
-        ("down", "Press D-pad DOWN.", "button", True),
-        ("left", "Press D-pad LEFT.", "button", True),
-        ("right", "Press D-pad RIGHT.", "button", True),
-        ("l2", "Press the button you want as L2 (look left / back).", "button", True),
-        ("r2", "Press the button you want as R2 (look right).", "button", True),
+        ("up", "Press D-pad UP.", "any", True),
+        ("down", "Press D-pad DOWN.", "any", True),
+        ("left", "Press D-pad LEFT.", "any", True),
+        ("right", "Press D-pad RIGHT.", "any", True),
+        ("l2", "Press the button you want as L2 (look left / back).", "any", True),
+        ("r2", "Press the button you want as R2 (look right).", "any", True),
         ("ps", "Press the button you want as the PS / Home button.", "button", True),
         ("shifter_1", "H-shifter: put it in 1st gear (Skip if you have no shifter - skips all gears).", "button", True),
         ("shifter_2", "H-shifter: 2nd gear.", "button", True),
@@ -1573,7 +2247,7 @@ class WheelWizard(QDialog):
         from . import gamepad
         self.gp = gamepad
         self.js = gamepad.Joysticks()
-        self.setWindowTitle("Racing wheel set-up")
+        self.setWindowTitle(tr("Racing wheel set-up"))
         self.setMinimumWidth(560)
         self.mapping: dict = {}
         self.wheel_name = ""
@@ -1581,47 +2255,252 @@ class WheelWizard(QDialog):
         v = QVBoxLayout(self)
         self.devices_lbl = label("", 9, name="muted")
         v.addWidget(self.devices_lbl)
+
+        # Calibration controls container
+        self.calib_container = QWidget()
+        calib_v = QVBoxLayout(self.calib_container)
+        calib_v.setContentsMargins(0, 0, 0, 0)
+
+        target_row = QHBoxLayout()
+        target_row.addWidget(label(tr("Capture controls from:"), 9, name="muted"))
+        self.device_box = QComboBox()
+        self.device_box.setToolTip("Choose the wheel or another input device. Select a different device for separate USB pedals or shifters.")
+        target_row.addWidget(self.device_box, 1)
+        self.refresh_devices_btn = QPushButton(tr("Refresh"))
+        self.refresh_devices_btn.clicked.connect(self._rescan_devices)
+        target_row.addWidget(self.refresh_devices_btn)
+        calib_v.addLayout(target_row)
+        self.device_box.currentIndexChanged.connect(self._capture_device_changed)
+        self._refresh_capture_devices()
+
         self.step_lbl = label("", 9, name="muted")
-        v.addWidget(self.step_lbl)
+        calib_v.addWidget(self.step_lbl)
         self.instr = label("", 13, True)
         self.instr.setMinimumHeight(70)
-        v.addWidget(self.instr)
+        calib_v.addWidget(self.instr)
+
+        self.axis_meter = QWidget()
+        axis_row = QHBoxLayout(self.axis_meter)
+        axis_row.setContentsMargins(0, 0, 0, 4)
+        axis_row.addWidget(label(tr("Input level:"), 9, name="muted"))
+        self.axis_bar = QProgressBar()
+        self.axis_bar.setRange(0, 100)
+        self.axis_bar.setValue(0)
+        self.axis_bar.setTextVisible(False)
+        self.axis_bar.setFixedHeight(14)
+        axis_row.addWidget(self.axis_bar, 1)
+        self.axis_pct_lbl = label("0%", 10, True)
+        self.axis_pct_lbl.setMinimumWidth(44)
+        self.axis_pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        axis_row.addWidget(self.axis_pct_lbl)
+        calib_v.addWidget(self.axis_meter)
+
         self.status = label("", 10, name="ok")
-        v.addWidget(self.status)
+        calib_v.addWidget(self.status)
+        v.addWidget(self.calib_container)
+
+        # Review & test container
+        self.review_container = QWidget()
+        self.review_layout = QVBoxLayout(self.review_container)
+        self.review_layout.setContentsMargins(0, 0, 0, 0)
+        self.review_bars: dict[str, QProgressBar] = {}
+        self.review_container.setVisible(False)
+        v.addWidget(self.review_container)
+
         h = QHBoxLayout()
-        self.back_btn = QPushButton("Back")
+        self.back_btn = QPushButton(tr("Back"))
         self.back_btn.clicked.connect(self._back)
         h.addWidget(self.back_btn)
         h.addStretch(1)
-        self.skip_btn = QPushButton("Skip")
+
+        self.finish_btn = QPushButton(tr("Save & Finish"))
+        self.finish_btn.setObjectName("accent")
+        self.finish_btn.clicked.connect(self._finish)
+        self.finish_btn.setVisible(False)
+        h.addWidget(self.finish_btn)
+
+        self.skip_btn = QPushButton(tr("Skip"))
         self.skip_btn.clicked.connect(self._skip)
         h.addWidget(self.skip_btn)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(tr("Cancel"))
         cancel.clicked.connect(self.reject)
         h.addWidget(cancel)
         v.addLayout(h)
+
         self.i = 0
         self.phase = "arm"
+        self.hit_control = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         self._start_step()
         self.timer.start(25)
 
     def _start_step(self) -> None:
-        names = [d["name"] + ("  (wheel)" if d["is_wheel"] else "") for d in self.js.devices]
+        self.hit_control = None
+        names = [f"{d['name']} ({d['vendor']:04X}:{d['product']:04X}, {d['axes']} axes)"
+                 + ("  (wheel)" if d["is_wheel"] else "") for d in self.js.devices]
         self.devices_lbl.setText("Detected: " + (", ".join(names) or "no controllers - connect your wheel"))
         if self.i >= len(self.STEPS):
-            self._finish()
+            self._show_review()
             return
+        self.calib_container.setVisible(True)
+        self.review_container.setVisible(False)
+        self.finish_btn.setVisible(False)
+        self.skip_btn.setVisible(True)
         key, text, kind, optional = self.STEPS[self.i]
+        # Restarting a step (Refresh, device change) must forget what this step already captured,
+        # otherwise a wrong capture stays in self.used and later steps ignore that axis (issue #41).
+        if self.mapping.pop(key, None) is not None:
+            self._rebuild_used()
         self.step_lbl.setText(f"Step {self.i + 1} of {len(self.STEPS)}")
         self.instr.setText(text)
+        self.axis_meter.setVisible(kind == "axis")
+        self.axis_bar.setValue(0)
+        self.axis_pct_lbl.setText("0%")
         self.status.setText("")
         self.skip_btn.setEnabled(optional)
         self.back_btn.setEnabled(self.i > 0)
         self.phase = "settle"
-        self.settle_until = __import__("time").time() + 0.4
+        now = __import__("time").time()
+        self.settle_until = now + 0.3
+        self.settle_deadline = now + 2.0
+        self.settle_prev = None
         self.base = None
+
+    def _show_review(self) -> None:
+        self.phase = "review"
+        self.calib_container.setVisible(False)
+        self.skip_btn.setVisible(False)
+        self.finish_btn.setVisible(True)
+        self.back_btn.setEnabled(True)
+
+        while self.review_layout.count():
+            item = self.review_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        self.review_bars.clear()
+        self.review_layout.addWidget(label(tr("Controls Review & Test"), 13, True))
+        self.review_layout.addWidget(label(
+            tr("Test your steering and pedals below. If any pedal is pressed when released, check 'Invert'."),
+            9, name="muted"
+        ))
+
+        grid = QGridLayout()
+        row = 0
+        axes_to_show = [("steering", "Steering"), ("throttle", "Throttle"), ("brake", "Brake"), ("clutch", "Clutch")]
+        for key, title in axes_to_show:
+            m = self.mapping.get(key)
+            if not m or m.get("type") != "axis":
+                continue
+            grid.addWidget(label(tr(title), 10, True), row, 0)
+            bar = QProgressBar()
+            if key == "steering":
+                bar.setRange(-100, 100)
+                bar.setValue(0)
+                bar.setFormat("%v%")
+            else:
+                bar.setRange(0, 100)
+                bar.setValue(0)
+                bar.setFormat("%v%")
+            grid.addWidget(bar, row, 1)
+            self.review_bars[key] = bar
+
+            inv_chk = QCheckBox(tr("Invert"))
+            inv_chk.setChecked(bool(m.get("reverse", False)))
+            inv_chk.toggled.connect(lambda checked, k=key: self._set_mapping_reverse(k, checked))
+            grid.addWidget(inv_chk, row, 2)
+            row += 1
+
+        self.review_layout.addLayout(grid)
+        self.review_btn_lbl = label(tr("Buttons: press any mapped button to test"), 9, name="muted")
+        self.review_layout.addWidget(self.review_btn_lbl)
+        self.review_container.setVisible(True)
+
+    def _set_mapping_reverse(self, key: str, rev: bool) -> None:
+        if key in self.mapping:
+            self.mapping[key]["reverse"] = rev
+
+    def _update_review(self, now: list[dict]) -> None:
+        for k, bar in self.review_bars.items():
+            m = self.mapping.get(k)
+            if not m or m.get("type") != "axis":
+                continue
+            target_di = None
+            for di, d in enumerate(self.js.devices):
+                if d["type_id"] == m["device_type_id"]:
+                    target_di = di
+                    break
+            if target_di is None or target_di >= len(now):
+                continue
+            axes = now[target_di].get("axes", [])
+            axis_id = m["id"]
+            if axis_id >= len(axes):
+                continue
+            raw = axes[axis_id]
+            rev = m.get("reverse", False)
+            if rev:
+                raw = -raw
+            if k == "steering":
+                pct = int(max(-100, min(100, (raw / 32767.0) * 100)))
+                bar.setValue(pct)
+            else:
+                pct = int(max(0, min(100, (0x7FFF - raw) / 65535.0 * 100)))
+                bar.setValue(pct)
+
+        pressed_names = []
+        for k, m in self.mapping.items():
+            if m.get("type") != "button":
+                continue
+            target_di = None
+            for di, d in enumerate(self.js.devices):
+                if d["type_id"] == m["device_type_id"]:
+                    target_di = di
+                    break
+            if target_di is None or target_di >= len(now):
+                continue
+            buttons = now[target_di].get("buttons", [])
+            btn_id = m["id"]
+            if btn_id < len(buttons) and buttons[btn_id]:
+                pressed_names.append(k.upper())
+        if pressed_names:
+            self.review_btn_lbl.setText(f"{tr('Pressed')}: {', '.join(pressed_names)}")
+
+    def _refresh_capture_devices(self) -> None:
+        selected = self.device_box.currentData() if hasattr(self, "device_box") else None
+        self.device_box.blockSignals(True)
+        self.device_box.clear()
+        self.device_box.addItem("Select a device...", "__select__")
+        ids = set()
+        for d in self.js.devices:
+            tid = d["type_id"]
+            if tid in ids:
+                continue  # RPCS3 also treats devices with the same type ID as one device group.
+            ids.add(tid)
+            self.device_box.addItem(f"{d['name']} ({d['vendor']:04X}:{d['product']:04X})", tid)
+        self.device_box.addItem("Any detected device (advanced)", None)
+        preferred = selected if selected in ids else None
+        if preferred is None:
+            wheels = [d["type_id"] for d in self.js.devices if d["is_wheel"]]
+            if len(set(wheels)) == 1:
+                preferred = wheels[0]
+            elif len(ids) == 1:
+                preferred = next(iter(ids))
+        if preferred is not None:
+            index = self.device_box.findData(preferred)
+            if index >= 0:
+                self.device_box.setCurrentIndex(index)
+        self.device_box.blockSignals(False)
+
+    def _capture_device_changed(self, _index: int) -> None:
+        if hasattr(self, "timer") and self.timer.isActive() and self.i < len(self.STEPS):
+            self._start_step()
+
+    def _rescan_devices(self) -> None:
+        self.js.refresh()
+        self._refresh_capture_devices()
+        self._start_step()
 
     def _poll(self) -> None:
         import time
@@ -1629,30 +2508,92 @@ class WheelWizard(QDialog):
             self._rescan = getattr(self, "_rescan", 0) + 1
             if self._rescan % 40 == 1:  # about once a second (timer runs every 25 ms)
                 self.js.refresh()
+                self._refresh_capture_devices()
             if not self.js.devices:
                 self.devices_lbl.setText("Detected: no controllers - connect your wheel")
                 return
             self._start_step()  # device appeared: show it and take a fresh baseline
             return
         now = self.js.state()
+        if self.phase == "review":
+            self._update_review(now)
+            return
         if self.phase == "settle":  # wait until the previous control is released, then take a baseline
-            if time.time() >= self.settle_until:
+            # Only take the baseline once every axis has held still for 0.3 s (max 2 s). Some wheels
+            # (G923 on Windows) report pedals as 0 until their first input report arrives; a baseline
+            # taken before that makes the pedal's jump to its rest value look like movement (#41).
+            t = time.time()
+            if self.settle_prev is not None and self._axes_moved(self.settle_prev, now):
+                self.settle_until = t + 0.3
+            self.settle_prev = now
+            if t >= self.settle_until or t >= self.settle_deadline:
                 self.base, self.phase = now, "wait"
             return
         if self.phase == "release":
-            if self.gp.detect_change(self.base, now, self.js.devices, "any") is None:
-                self.i += 1
-                self._start_step()
+            if self.hit_control is not None:
+                if self.hit_control.get("type") == "axis":
+                    self._update_axis_meter_release(self.hit_control, now)
+                if self._is_released(self.hit_control, now):
+                    self.i += 1
+                    self._start_step()
             return
         key, _text, kind, _opt = self.STEPS[self.i]
-        hit = self.gp.detect_change(self.base, now, self.js.devices, kind, self.used)
+        self._adopt_late_axes(now)
+        exclude = set(self.used)
+        if key in ("throttle", "brake"):
+            other_pedal = self.mapping.get("brake" if key == "throttle" else "throttle")
+            if other_pedal and other_pedal["type"] == "axis":
+                # Combined-pedal wheels expose accelerator and brake on opposite ends of one axis.
+                exclude.discard((other_pedal["device_type_id"], "axis", other_pedal["id"]))
+        if key in ("left", "right"):
+            other_dpad = self.mapping.get("right" if key == "left" else "left")
+            if other_dpad and other_dpad["type"] == "axis":
+                exclude.discard((other_dpad["device_type_id"], "axis", other_dpad["id"]))
+        if key in ("up", "down"):
+            other_dpad = self.mapping.get("down" if key == "up" else "up")
+            if other_dpad and other_dpad["type"] == "axis":
+                exclude.discard((other_dpad["device_type_id"], "axis", other_dpad["id"]))
+        selected_device = self.device_box.currentData()
+        if selected_device == "__select__":
+            self.status.setText("Choose the wheel or input device above before calibrating this control.")
+            return
+        allowed = {int(selected_device)} if selected_device is not None else None
+        if kind == "axis":
+            self._update_axis_meter_wait(now, exclude, allowed)
+        hit = self.gp.detect_change(self.base, now, self.js.devices, kind, exclude, allowed)
+        if not hit and allowed is not None:
+            # Multi-device setups (separate USB shifter / pedals): if an input was made on
+            # another connected controller, auto-switch the device box to it.
+            other_hit = self.gp.detect_change(self.base, now, self.js.devices, kind, exclude, None)
+            if other_hit:
+                idx = self.device_box.findData(other_hit["device_type_id"])
+                if idx >= 0:
+                    self.device_box.blockSignals(True)
+                    self.device_box.setCurrentIndex(idx)
+                    self.device_box.blockSignals(False)
+                    hit = other_hit
         if not hit:
             return
+        self._fix_late_rest(hit, key)
+        self.hit_device_type_id = hit["device_type_id"]
+        self.hit_control = hit
         m = {"device_type_id": hit["device_type_id"], "type": hit["type"], "id": hit["id"], "hat": hit["hat"],
              "reverse": False}
         if hit["type"] == "axis":
-            # steering: turning right must increase; pedals: pressed must increase (released = minimum)
-            m["reverse"] = hit["moved"] < hit["rest"]
+            self.axis_bar.setValue(100)
+            self.axis_pct_lbl.setText("100%")
+            if key == "steering":
+                # Steering: turning right must increase axis value
+                m["reverse"] = hit["moved"] < hit["rest"]
+            else:
+                # Pedals (throttle, brake, clutch): in RPCS3's Logitech G27 emulation
+                # (LogitechG27.cpp), 0x00 is Pressed and 0xFF is Released.
+                # Released pedal must read as axis maximum (+32767), and pressed pedal
+                # must read as axis minimum (-32768).
+                # If pressing the pedal increases the axis value, it must be inverted (reverse = True).
+                # If pressing the pedal decreases the axis value (e.g. Thrustmaster T150/T300 resting
+                # at +32767 and moving to -32768), reverse must be False.
+                m["reverse"] = hit["moved"] > hit["rest"]
             self.used.add((hit["device_type_id"], "axis", hit["id"]))
         elif hit["type"] == "hat":
             self.used.add((hit["device_type_id"], "hat", hit["id"], hit["hat"]))
@@ -1662,9 +2603,93 @@ class WheelWizard(QDialog):
         if key == "steering":
             dev = next(d for d in self.js.devices if d["type_id"] == hit["device_type_id"])
             self.wheel_name = dev["name"]
+            if self.device_box.currentData() is None:
+                idx = self.device_box.findData(hit["device_type_id"])
+                if idx >= 0:
+                    self.device_box.blockSignals(True)
+                    self.device_box.setCurrentIndex(idx)
+                    self.device_box.blockSignals(False)
         what = f"{hit['type']} {hit['id']}" + (f" {hit['hat']}" if hit["hat"] else "")
         self.status.setText(f"OK - {what}. Release it...")
         self.phase = "release"
+
+    def _update_axis_meter_wait(self, now: list[dict], exclude: set, allowed: Optional[set[int]]) -> None:
+        """Show live axis movement as 0-100% of the capture threshold during axis calibration."""
+        threshold = 0x7FFF * 0.35
+        max_delta = 0.0
+        for di, (b, n) in enumerate(zip(self.base or [], now)):
+            tid = self.js.devices[di]["type_id"]
+            if allowed is not None and tid not in allowed:
+                continue
+            for i, (bv, nv) in enumerate(zip(b["axes"], n["axes"])):
+                if (tid, "axis", i) in exclude:
+                    continue
+                d = abs(nv - bv)
+                if d > max_delta:
+                    max_delta = d
+        if max_delta < threshold * 0.05 and allowed is not None:
+            for di, (b, n) in enumerate(zip(self.base or [], now)):
+                tid = self.js.devices[di]["type_id"]
+                for i, (bv, nv) in enumerate(zip(b["axes"], n["axes"])):
+                    if (tid, "axis", i) in exclude:
+                        continue
+                    d = abs(nv - bv)
+                    if d > max_delta:
+                        max_delta = d
+        pct = int(min(100, max(0, (max_delta / threshold) * 100)))
+        self.axis_bar.setValue(pct)
+        self.axis_pct_lbl.setText(f"{pct}%")
+
+    def _update_axis_meter_release(self, hit: dict, now: list[dict]) -> None:
+        """Show the captured axis returning to 0% as the user releases/centers it."""
+        for di, d in enumerate(self.js.devices):
+            if d["type_id"] == hit["device_type_id"] and di < len(now):
+                axes = now[di].get("axes", [])
+                idx = hit["id"]
+                if idx < len(axes):
+                    rest = hit.get("rest", 0)
+                    moved = hit.get("moved", 0)
+                    denom = max(abs(moved - rest), 0x7FFF * 0.35)
+                    pct = int(min(100, max(0, (abs(axes[idx] - rest) / denom) * 100)))
+                    self.axis_bar.setValue(pct)
+                    self.axis_pct_lbl.setText(f"{pct}%")
+                break
+
+    def _is_released(self, hit: dict, now: list[dict]) -> bool:
+        """Check if the specific control that was just calibrated has been released/centered."""
+        target_di = None
+        for di, d in enumerate(self.js.devices):
+            if d["type_id"] == hit["device_type_id"]:
+                target_di = di
+                break
+        if target_di is None or target_di >= len(now):
+            return True
+        dev_now = now[target_di]
+        kind = hit["type"]
+        idx = hit["id"]
+        if kind == "button":
+            buttons = dev_now.get("buttons", [])
+            return idx >= len(buttons) or not buttons[idx]
+        elif kind == "hat":
+            hats = dev_now.get("hats", [])
+            if idx < len(hats):
+                hat_val = hats[idx]
+                bit = next((b for b, name in self.gp.HAT_BITS.items() if name == hit.get("hat")), 0)
+                return (hat_val & bit) == 0 if bit else hat_val == 0
+            return True
+        elif kind == "axis":
+            axes = dev_now.get("axes", [])
+            if idx < len(axes):
+                current_val = axes[idx]
+                rest_val = hit.get("rest", 0)
+                moved_val = hit.get("moved", 0)
+                travel = abs(moved_val - rest_val)
+                dist = abs(current_val - rest_val)
+                if travel > 0:
+                    return dist <= travel * 0.35 or dist <= 0x7FFF * 0.2
+                return dist <= 0x7FFF * 0.2
+            return True
+        return True
 
     def _skip(self) -> None:
         key = self.STEPS[self.i][0]
@@ -1676,13 +2701,72 @@ class WheelWizard(QDialog):
         self._start_step()
 
     def _back(self) -> None:
+        if self.phase == "review":
+            self.review_container.setVisible(False)
+            self.calib_container.setVisible(True)
+            self.finish_btn.setVisible(False)
+            self.skip_btn.setVisible(True)
+            self.i = len(self.STEPS) - 1
+            old = self.mapping.pop(self.STEPS[self.i][0], None)
+            if old:
+                self._rebuild_used()
+            self._start_step()
+            return
         if self.i > 0:
             self.i -= 1
             old = self.mapping.pop(self.STEPS[self.i][0], None)
             if old:
-                self.used = {u for u in self.used if not (u[0] == old["device_type_id"] and u[1] == old["type"]
-                                                          and u[2] == old["id"])}
+                self._rebuild_used()
             self._start_step()
+
+    def _adopt_late_axes(self, now: list[dict]) -> None:
+        """Issue #41 (G923 on Windows): SDL reads 0 for every axis until the device sends its first
+        report, which only happens when something moves. Turning the wheel then makes the pedals
+        jump from 0 to their rest value (an end of the range), which looked like a full pedal
+        movement and was captured as steering. When an axis reports for the first time at an end
+        of its range, take that value as its baseline instead of treating the jump as movement.
+        An axis that first reports somewhere in between is the one being moved; its rest value is
+        fixed up when it is captured (_fix_late_rest)."""
+        for b, n in zip(self.base or [], now):
+            was, isnow = b.get("reported"), n.get("reported")
+            if was is None or isnow is None:
+                continue
+            for i, (before, after) in enumerate(zip(was, isnow)):
+                if not before and after and abs(n["axes"][i]) >= 0x7FFF * 0.9:
+                    b["axes"][i] = n["axes"][i]
+                    was[i] = True
+
+    def _fix_late_rest(self, hit: dict, key: str) -> None:
+        """A pedal whose device had not reported at baseline reads 0 there, not its real rest
+        value. Pedals rest at one end of the range, the end opposite to where they were pressed."""
+        if hit.get("type") != "axis" or key not in ("throttle", "brake", "clutch"):
+            return
+        di = next((i for i, d in enumerate(self.js.devices) if d["type_id"] == hit["device_type_id"]), None)
+        if di is None or di >= len(self.base or []):
+            return
+        reported = self.base[di].get("reported")
+        if reported is None or hit["id"] >= len(reported) or reported[hit["id"]]:
+            return
+        hit["rest"] = -0x8000 if hit["moved"] > 0 else 0x7FFF
+
+    @staticmethod
+    def _axes_moved(prev: list[dict], now: list[dict]) -> bool:
+        """True if any axis changed by more than 5 % of its range between two snapshots."""
+        if len(prev) != len(now):
+            return True
+        for p, n in zip(prev, now):
+            for pv, nv in zip(p.get("axes", []), n.get("axes", [])):
+                if abs(nv - pv) > 0x7FFF * 0.05:
+                    return True
+        return False
+
+    def _rebuild_used(self) -> None:
+        self.used = set()
+        for mapped in self.mapping.values():
+            if mapped.get("type") == "hat":
+                self.used.add((mapped["device_type_id"], "hat", mapped["id"], mapped.get("hat")))
+            else:
+                self.used.add((mapped["device_type_id"], mapped["type"], mapped["id"]))
 
     def _finish(self) -> None:
         self.timer.stop()
@@ -1724,6 +2808,7 @@ def _track_tabs_edge(win: "MainWindow") -> None:
     if edge != bg.visible_right:
         bg.visible_right = edge
         bg.update()
+    win._update_egg_btn_pos()
 
 
 def main() -> int:

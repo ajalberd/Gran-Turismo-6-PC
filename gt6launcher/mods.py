@@ -248,7 +248,13 @@ def game_data_ready(title_id: str) -> bool:
     """True once the game has merged its update data into USRDIR/PDIPFS
     (happens on the first boot after installing updates)."""
     d = pdipfs_dir(title_id)
-    return os.path.isdir(d) and any(os.scandir(d))
+    try:
+        # A fresh PKG install only contains an initial skeleton (1-2 dirs like '9' and 'K').
+        # After GT6 completes its one-time in-game installation, PDIPFS has 25+ root directories
+        # and thousands of unpacked files.
+        return os.path.isdir(d) and len(os.listdir(d)) >= 20
+    except OSError:
+        return False
 
 
 def install(title_id: str, mod_id: str, progress: Optional[ProgressFn] = None) -> int:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -114,7 +115,38 @@ def _diag_dlldir() -> int:
     return 1 if leaked else 0
 
 
+_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",                 # Debian/Ubuntu, Arch, SteamOS
+    "/etc/pki/tls/certs/ca-bundle.crt",                   # Fedora/RHEL
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # Fedora/RHEL
+    "/etc/ssl/ca-bundle.pem",                             # openSUSE
+    "/etc/ssl/cert.pem",                                  # Alpine, Arch
+)
+
+
+def _ensure_ca_bundle() -> None:
+    """The AppImage's bundled OpenSSL looks for CA certificates where its build distro keeps them
+    (/usr/lib/ssl on Ubuntu). SteamOS and other distros keep them elsewhere, so every HTTPS request
+    failed with CERTIFICATE_VERIFY_FAILED (no game patches, no update check, no downloads - #54)."""
+    if sys.platform.startswith("win") or sys.platform == "darwin" or os.environ.get("SSL_CERT_FILE"):
+        return
+    import ssl
+    default = ssl.get_default_verify_paths()
+    if default.cafile and os.path.isfile(default.cafile):
+        return
+    for path in _CA_BUNDLES:
+        if os.path.isfile(path):
+            os.environ["SSL_CERT_FILE"] = path
+            return
+    try:
+        import certifi  # optional fallback when present
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:
+        pass
+
+
 def main() -> int:
+    _ensure_ca_bundle()
     if len(sys.argv) > 1 and not sys.argv[1].startswith("-psn"):
         return cli(sys.argv[1:])
     from .ui import main as gui_main

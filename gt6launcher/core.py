@@ -11,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .i18n import tr
+
 from . import lan, mods, patches, paths
 from . import profile as profile_mod
 from .formats import GameImage, identify_folder, identify_iso
@@ -57,7 +59,7 @@ class Core:
             self.rpcs3_path()
         self._migrate()
 
-    PROFILE_REV = 4
+    PROFILE_REV = 6
 
     def _migrate(self) -> None:
         rev = int(self.data.get("profile_rev", 1))
@@ -80,6 +82,15 @@ class Core:
                     os.unlink(os.path.join(base, rel))
                 except OSError:
                     pass
+        if rev < 5 and "profile" in self.data:
+            # rev 5: upgrade spu_block_size from old "Safe" default to RAM-aware choice
+            if self.data.get("profile", {}).get("spu_block_size") == "Safe":
+                from .profile import default_spu_block_size
+                self.settings.spu_block_size = default_spu_block_size()
+        if rev < 6 and "profile" in self.data:
+            # rev 6: v1.2 defaulted ZCull occlusion queries to on, which stalls the car delivery and
+            # part install screens at 1-5 fps (Issues #40, #42). Back to disabled for everyone.
+            self.settings.zcull_queries_disabled = True
         if rev != self.PROFILE_REV:
             self.data["profile_rev"] = self.PROFILE_REV
             self.save()
@@ -362,7 +373,8 @@ class Core:
             self.log(gamepad.configure(self.settings.controller_mode, self.settings.controller_device, self.log))
             m = self.settings.wheel_mapping or {}
             on = bool(self.settings.wheel_enabled and m.get("steering"))
-            gamepad.write_g27_config(m, on, ffb_device=int(m["steering"]["device_type_id"]) if on else 0)
+            gamepad.write_g27_config(m, on, ffb_device=int(m["steering"]["device_type_id"]) if on else 0,
+                                     reverse_effects=self.settings.wheel_reverse_ffb)
             if on:
                 self.log(f"racing wheel: {self.settings.wheel_name} as Logitech G27")
         except Exception as e:  # never block a launch on controller detection
@@ -373,6 +385,8 @@ class Core:
             env["MANGOHUD"] = "1"
         if self.settings.use_gamemode and shutil.which("gamemoderun"):
             wrapper = ["gamemoderun"]
+        from . import diagnostics
+        diagnostics.preserve_last_session_rpcs3()
         return rp.boot(entry.image.path, fullscreen=self.settings.fullscreen, extra_env=env, wrapper=wrapper)
 
     def effective_settings(self, tid: str, ver: Optional[str]) -> Settings:
@@ -408,6 +422,114 @@ class Core:
     def memlock_too_low(self) -> bool:
         lim = self.memlock_limit()
         return lim is not None and lim < self.MEMLOCK_WANT
+
+    def hardware_advisory(self) -> list[str]:
+        """Advisory checks only; these never alter settings or prevent a launch."""
+        warnings = []
+        threads = os.cpu_count()
+        if threads is not None and threads < 4:
+            warnings.append(tr("Only {n} logical CPU thread(s) detected; GT6 needs at least a 4-core-class CPU.").format(n=threads))
+
+        try:
+            if paths.IS_WINDOWS:
+                import ctypes
+
+                class MemoryStatus(ctypes.Structure):
+                    _fields_ = [("length", ctypes.c_ulong), ("memory_load", ctypes.c_ulong),
+                                ("total_phys", ctypes.c_ulonglong), ("avail_phys", ctypes.c_ulonglong),
+                                ("total_page_file", ctypes.c_ulonglong), ("avail_page_file", ctypes.c_ulonglong),
+                                ("total_virtual", ctypes.c_ulonglong), ("avail_virtual", ctypes.c_ulonglong),
+                                ("avail_extended_virtual", ctypes.c_ulonglong)]
+
+                status = MemoryStatus()
+                status.length = ctypes.sizeof(status)
+                ram_bytes = (status.total_phys if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+                             else 0)
+            else:
+                ram_bytes = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            ram_gib = ram_bytes / (1024 ** 3)
+            if ram_gib and ram_gib < 16:
+                warnings.append(tr("{ram} GiB RAM detected; 16 GiB is recommended to reduce memory pressure.").format(ram=f"{ram_gib:.1f}"))
+        except (AttributeError, OSError, ValueError):
+            pass
+
+        for adapter in self.gpu_adapters():
+            is_low, msg = self.check_gpu_low_vram(adapter)
+            if is_low and msg:
+                warnings.append(f"{adapter}: {msg}")
+        return warnings
+
+    def check_gpu_low_vram(self, adapter: str) -> tuple[bool, str]:
+        """Returns (is_low_vram, advisory_message) for a given GPU adapter name."""
+        if not adapter:
+            return False, ""
+
+        name = adapter.lower()
+
+        # 1. Integrated graphics (shared memory / very low dedicated VRAM)
+        is_intel_igpu = "intel" in name and any(
+            x in name for x in ("uhd", "hd graphics", "iris", "graphics", "integrated")
+        ) and "arc" not in name
+
+        is_amd_igpu = any(
+            x in name for x in (
+                "vega 3", "vega 6", "vega 7", "vega 8", "vega 11",
+                "radeon 660m", "radeon 680m", "radeon 740m", "radeon 760m", "radeon 780m",
+            )
+        ) or (
+            "radeon" in name
+            and ("graphics" in name or "apu" in name)
+            and not any(x in name for x in ("rx ", "pro ", "vii", "vega 56", "vega 64", "rdna", "gfx1", "gfx90", "xt"))
+        )
+
+        is_sw_or_other_igpu = any(x in name for x in ("apple m", "llvmpipe", "microsoft basic", "swiftshader"))
+
+        if is_intel_igpu or is_amd_igpu or is_sw_or_other_igpu:
+            return True, tr(
+                "Integrated GPU detected (shared VRAM). A dedicated GPU with 6+ GB VRAM "
+                "is recommended for GT6 to avoid stuttering."
+            )
+
+        # 2. Explicit VRAM markers in device name (e.g., '4GB', '3GB', '2GB', '1GB')
+        m = re.search(r"\b([1-4])\s*gb\b", name)
+        if m:
+            vram_num = m.group(1)
+            return True, tr(
+                "Low VRAM GPU detected ({gb} GB). 6+ GB VRAM is recommended for GT6. "
+                "Higher resolutions (1080p+ / 1440p) may stutter or run out of memory."
+            ).format(gb=vram_num)
+
+        # 3. Known low-VRAM (< 6 GB) dedicated GPUs
+        low_vram_models = (
+            # NVIDIA
+            "gt 1030", "gtx 1030", "gt 710", "gt 730", "gt 640", "gt 740",
+            "gtx 750", "gtx 760", "gtx 770", "gtx 780",
+            "gtx 950", "gtx 960", "gtx 970", "gtx 980",
+            "gtx 1050", "gtx 1060 3gb",
+            "gtx 1630", "gtx 1650",
+            "rtx 3050 4gb", "rtx 2050",
+            # AMD
+            "rx 550", "rx 560", "rx 460",
+            "rx 6400", "rx 6500",
+            "r7 250", "r7 260", "r7 265", "r7 350", "r7 360", "r7 370",
+            "r9 270", "r9 280", "r9 285", "r9 370", "r9 380",
+            # Intel Arc
+            "arc a310", "arc a380",
+        )
+        normalized = name.replace("geforce", "").replace("radeon", "")
+        # Model markers must not match a longer model number (e.g. RX 550
+        # must not classify RX 5500 XT, which is available with 8 GB).
+        if any(
+            re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?!\d)", candidate)
+            for marker in low_vram_models
+            for candidate in (name, normalized)
+        ):
+            return True, tr(
+                "Low VRAM GPU detected (< 6 GB). 6+ GB VRAM is recommended for GT6. "
+                "Keep resolution scale at 100% (720p/1080p) to avoid stuttering."
+            )
+
+        return False, ""
 
     def ensure_rpcs3_windows(self, progress=None) -> str:
         from .rpcs3 import install_windows_rpcs3

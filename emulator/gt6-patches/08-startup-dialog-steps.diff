@@ -1,9 +1,18 @@
 --- a/rpcs3/rpcs3qt/gui_application.cpp
 +++ b/rpcs3/rpcs3qt/gui_application.cpp
-@@ -102,12 +102,23 @@
+@@ -102,12 +102,35 @@
  	m_show_next_dialog = [this, step_index, steps]()
  	{
  		ensure(steps && step_index);
++
++		const char* launch_origin = qEnvironmentVariableIsSet("GT6_LAUNCHER")
++			? "GT6 Launcher game boot" : qEnvironmentVariableIsSet("GT6_LAUNCHER_GUI")
++			? "RPCS3 GUI opened from GT6 Launcher (no GT6 boot)"
++			: qEnvironmentVariableIsSet("GT6_LAUNCHER_TOOL")
++			? "RPCS3 tool operation from GT6 Launcher (no GT6 boot)"
++			: "RPCS3 started directly; GT6 Launcher was bypassed";
++		gui_log.notice("GT6 launch origin: %s (PID %u)", launch_origin,
++			static_cast<u32>(QCoreApplication::applicationPid()));
 +
 +		// GT6 build: a dialog's finished() can fire twice (e.g. "Yes" activated twice before the
 +		// box is deleted). Ignore surplus calls instead of running past the last step (range check crash).
@@ -21,7 +30,10 @@
 -	if (!rpcs3::is_release_build() && !rpcs3::is_local_build())
 +	// GT6 build: the GT6 launcher starts this build on purpose and boots the game right away;
 +	// a modal "experimental build" question behind the fullscreen game only gets in the way.
-+	if (!rpcs3::is_release_build() && !rpcs3::is_local_build() && !qEnvironmentVariableIsSet("GT6_LAUNCHER"))
++	if (!rpcs3::is_release_build() && !rpcs3::is_local_build()
++		&& !qEnvironmentVariableIsSet("GT6_LAUNCHER")
++		&& !qEnvironmentVariableIsSet("GT6_LAUNCHER_GUI")
++		&& !qEnvironmentVariableIsSet("GT6_LAUNCHER_TOOL"))
  	{
  		steps->push_back([this]()
  		{

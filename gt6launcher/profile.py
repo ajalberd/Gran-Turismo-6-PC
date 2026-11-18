@@ -14,6 +14,8 @@ Sources for the defaults:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict, fields
+import os
+import sys
 from typing import Any
 
 # --------------------------------------------------------------------------- choices
@@ -38,7 +40,7 @@ AA_MODES = {
     "mlaa": "Stock MLAA",
     "mlaa_sharp": "Sharper MLAA (recommended)",
     "mlaa_strong": "Sharper MLAA - Strong",
-    "off": "No post AA (use with 200%+ resolution = SSAA)",
+    "off": "No post AA - skips GT6's post pass (sharpest, sky/clouds may band; use 200%+)",
 }
 UPSCALERS = {
     "bilinear": "Bilinear",
@@ -67,7 +69,7 @@ SHADOWS = {
 RENDER_PATHS = {
     "auto": "Automatic by game version (wiki: CPU blit up to 1.05, color buffers after)",
     "color_buffers": "Write + Read Color Buffers",
-    "cpu_blit": "Force CPU Blit (only correct up to 1.05)",
+    "cpu_blit": "Force CPU Blit (<= 1.05, or 1.22 with Speedboost for PCIe 3.0 x8 / narrow bus GPUs)",
 }
 LICENSE_AREA = {"BCES": "SCEE", "NPEA": "SCEE", "BCUS": "SCEA", "NPUA": "SCEA", "BCJS": "SCEJ", "NPJA": "SCEJ",
                 "BCAS": "SCEH", "NPHA": "SCEH", "BCKS": "SCEK"}
@@ -100,6 +102,355 @@ ENGINE_COLOR = {
 }
 GRADING_SLIDERS = {**COLOR_GRADING, **ENGINE_COLOR}
 SCHEDULERS = ["Operating System", "RPCS3 Scheduler", "RPCS3 Alternative Scheduler"]
+ZCULL_ACCURACY = ["Approximate", "Relaxed", "Precise"]
+
+
+def detect_system_ram_gb() -> float:
+    """Detect total system physical RAM in GiB across Linux and Windows."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return stat.ullTotalPhys / (1024 ** 3)
+        elif hasattr(os, "sysconf"):
+            if "SC_PAGE_SIZE" in os.sysconf_names and "SC_PHYS_PAGES" in os.sysconf_names:
+                return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
+    except Exception:
+        pass
+    return 16.0
+
+
+def default_spu_block_size() -> str:
+    """Select best SPU Block Size based on total system RAM.
+
+    - Under 8 GB RAM (e.g. 4-6 GB): 'Safe' to prevent compiler memory pressure / OOM-killer.
+    - 8 GB RAM and above: 'Mega' for optimal performance and thread stability in GT6.
+    (Note: 'Giga' is never auto-selected as it causes thread deadlocks and audio desyncs in GT6).
+    """
+    ram = detect_system_ram_gb()
+    return "Safe" if ram < 7.0 else "Mega"
+
+
+def detect_gpu_pcie_bottleneck() -> bool:
+    """Return True if a discrete GPU is detected running on a narrow PCIe link (<= PCIe 3.0 x8, ~8GB/s)."""
+    if sys.platform == "linux":
+        try:
+            import glob
+            for dev in glob.glob("/sys/bus/pci/devices/*"):
+                class_path = os.path.join(dev, "class")
+                if os.path.isfile(class_path):
+                    with open(class_path, "r") as f:
+                        cls = f.read().strip()
+                    if cls.startswith("0x03"):
+                        speed_path = os.path.join(dev, "max_link_speed")
+                        if not os.path.isfile(speed_path):
+                            speed_path = os.path.join(dev, "current_link_speed")
+                        width_path = os.path.join(dev, "max_link_width")
+                        if not os.path.isfile(width_path):
+                            width_path = os.path.join(dev, "current_link_width")
+
+                        speed_val = 0.0
+                        if os.path.isfile(speed_path):
+                            with open(speed_path, "r") as f:
+                                for part in f.read().split():
+                                    try:
+                                        speed_val = float(part)
+                                        break
+                                    except ValueError:
+                                        pass
+                        width_val = 16
+                        if os.path.isfile(width_path):
+                            with open(width_path, "r") as f:
+                                try:
+                                    width_val = int(f.read().strip())
+                                except ValueError:
+                                    pass
+                        if 0 < speed_val <= 8.0 and width_val <= 8:
+                            return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_handheld_platform(cpu_name: str, dmi_info: str = "") -> bool:
+    """Return True if the CPU or board/product DMI clearly identifies a handheld gaming PC."""
+    combined_l = f"{cpu_name} {dmi_info}".lower()
+    # Explicit substring matches (safe from chipset collisions like Z170/Z270)
+    handheld_phrases = (
+        "custom apu 0405", "custom apu 0932", "aerith", "sephiroth", "vangogh", "steam deck", "steamdeck",
+        "ryzen z1", "z1 extreme", "ryzen z2", "z2 extreme", "z2 go",
+        "rog ally", "ally x", "rc71l", "rc72l",
+        "legion go", "83e1", "83l3",
+        "msi claw", "claw a8", "claw 8", "claw 7", "claw a1m",
+        "strix halo", "ai max+ 395", "ai max 395", "ai max 388", "ai max 385", "ryzen ai max",
+        "gpd win", "ayaneo", "onexplayer", "aokzoe", "zotac zone",
+    )
+    if any(h in combined_l for h in handheld_phrases):
+        return True
+    # Steam Deck: DMI is read as "board product vendor ..." = "Jupiter Jupiter Valve Valve" (LCD) or
+    # "Galileo Galileo Valve Valve" (OLED), so match the words independently of their order.
+    words = set(combined_l.split())
+    return "valve" in words and bool(words & {"jupiter", "galileo"})
+
+
+def detect_gpu_name() -> str:
+    """Fallback GPU name detection when rpcs3.log does not exist yet (Windows registry / Linux lspci)."""
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        try:
+            import winreg
+            base_key = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base_key) as cls_key:
+                for i in range(16):
+                    try:
+                        sub = winreg.EnumKey(cls_key, i)
+                        if not sub.isdigit():
+                            continue
+                        with winreg.OpenKey(cls_key, sub) as dev_key:
+                            desc, _ = winreg.QueryValueEx(dev_key, "DriverDesc")
+                            if desc:
+                                candidates.append(str(desc).strip())
+                    except OSError:
+                        break
+        except Exception:
+            pass
+    elif sys.platform == "linux":
+        try:
+            import shutil
+            import subprocess
+            if shutil.which("lspci"):
+                out = subprocess.check_output(["lspci"], text=True, errors="replace", timeout=2)
+                for line in out.splitlines():
+                    low = line.lower()
+                    if "vga compatible controller" in low or "3d controller" in low or "display controller" in low:
+                        parts = line.split(":", 2)
+                        if len(parts) == 3:
+                            candidates.append(parts[2].strip())
+        except Exception:
+            pass
+    if not candidates:
+        return ""
+    # Prefer discrete GPU over integrated graphics (matching Vulkan discrete-first ordering)
+    discrete_markers = ("rtx", "gtx", "rx ", "radeon pro", "arc a", "arc b", "arc(tm) a", "arc(tm) b")
+    for c in candidates:
+        if any(m in c.lower() for m in discrete_markers):
+            return c
+    for c in candidates:
+        if "microsoft basic" not in c.lower() and "llvmpipe" not in c.lower():
+            return c
+    return candidates[0]
+
+
+def detect_cpu_info() -> dict[str, Any]:
+    """Detect CPU model name, thread count, and architecture characteristics."""
+    threads = os.cpu_count() or 4
+    name = ""
+    dmi_info = ""
+    if sys.platform == "linux":
+        try:
+            with open("/proc/cpuinfo", "r", errors="replace") as f:
+                for line in f:
+                    if "model name" in line:
+                        name = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+        try:
+            for dmi_file in (
+                "/sys/devices/virtual/dmi/id/board_name",
+                "/sys/devices/virtual/dmi/id/product_name",
+                "/sys/devices/virtual/dmi/id/sys_vendor",
+                "/sys/devices/virtual/dmi/id/board_vendor",
+            ):
+                if os.path.isfile(dmi_file):
+                    with open(dmi_file, "r", errors="replace") as f:
+                        dmi_info += " " + f.read().strip()
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            name = name.strip()
+        except Exception:
+            pass
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS")
+            for subk in ("BaseBoardProduct", "SystemProductName", "BaseBoardManufacturer", "BIOSVersion"):
+                try:
+                    dmi_val, _ = winreg.QueryValueEx(key, subk)
+                    if dmi_val:
+                        dmi_info += " " + str(dmi_val).strip()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if not name:
+        import platform
+        name = platform.processor() or "Generic Processor"
+    combined_l = (name + " " + dmi_info).lower()
+    is_intel_hybrid = "intel" in combined_l and any(
+        g in combined_l for g in ("12th gen", "13th gen", "14th gen", "core ultra", "-12", "-13", "-14", "lunar lake", "arrow lake")
+    )
+    is_handheld_cpu = _is_handheld_platform(name, dmi_info)
+    return {
+        "name": name,
+        "threads": threads,
+        "is_intel_hybrid": is_intel_hybrid,
+        "is_handheld": is_handheld_cpu,
+        "board_name": dmi_info.strip(),
+        "dmi_info": dmi_info.strip(),
+        "is_pcie_bottleneck": detect_gpu_pcie_bottleneck(),
+    }
+
+
+def recommend_settings_for_hardware(cpu_info: dict[str, Any], gpu_name: str, ram_gb: float) -> tuple[dict[str, Any], list[str]]:
+    """Determine the optimal GT6 settings based on detected CPU, GPU, and RAM."""
+    cpu_name = cpu_info.get("name", "Generic CPU")
+    threads = cpu_info.get("threads", 4)
+    is_intel_hybrid = cpu_info.get("is_intel_hybrid", False)
+    is_handheld_cpu = cpu_info.get("is_handheld", False)
+    dmi_info = cpu_info.get("dmi_info", "") or cpu_info.get("board_name", "")
+    dmi_l = dmi_info.lower()
+    cpu_l = cpu_name.lower()
+    gpu_l = (gpu_name or "").lower()
+    is_pcie_bus_limited = cpu_info.get("is_pcie_bottleneck", False)
+
+    # Detect GPUs with narrow PCIe bus (e.g. x8 or x4 lanes: RTX 5060, 4060, 3050, RX 7600, 6600, etc.)
+    pcie_x8_gpus = ("5060", "4060", "3050", "7600", "6600", "6650", "6500", "6400", "5500", "a380", "a310")
+    is_pcie_x8_gpu = any(g in gpu_l for g in pcie_x8_gpus)
+
+    # Detect PCIe 3.0 vs PCIe 4.0+ motherboards/chipsets
+    pcie3_chipsets = ("b450", "b350", "a320", "x370", "x470", "a520", "h310", "b360", "b365", "h370", "z370", "z390", "h410", "b460", "h470", "z490", "h510")
+    pcie4_plus_chipsets = ("b550", "x570", "b650", "x670", "b850", "x870", "z590", "b560", "h570", "z690", "b660", "h670", "z790", "b760", "h770", "z890", "b860")
+    is_pcie3_board = any(c in dmi_l for c in pcie3_chipsets)
+    is_pcie4_plus_board = any(c in dmi_l for c in pcie4_plus_chipsets)
+
+    # Issue #36: RTX 5060 on B450 / ASUS PRIME B450M-K with Ryzen 5 5600 (or unknown board with 5600+5060, unless known PCIe 4.0+)
+    is_issue36_exact = "5060" in gpu_l and (
+        "b450" in dmi_l or "prime b450m-k" in dmi_l or ("5600" in cpu_l and not is_pcie4_plus_board)
+    )
+
+    # Narrow PCIe bus bottleneck (Issue #36): RSX thread saturated by color buffer readback over PCIe 3.0 x8 (~8 GB/s)
+    is_pcie_bandwidth_bottleneck = (
+        is_issue36_exact
+        or (is_pcie_x8_gpu and (is_pcie3_board or is_pcie_bus_limited))
+    )
+
+    is_amd = any(x in gpu_l for x in ("amd", "radeon"))
+    is_discrete_gpu = any(x in gpu_l for x in ("rtx", "gtx", "rx ", "radeon pro", "arc a", "arc b", "arc(tm) a", "arc(tm) b", "quadro"))
+    is_igpu = (not is_discrete_gpu) and (
+        is_handheld_cpu
+        or any(x in gpu_l for x in ("steam deck", "steamdeck", "vangogh", "custom gpu 0405", "custom gpu 0932", "vega", "660m", "680m", "740m", "760m", "780m", "uhd", "hd graphics", "iris", "130v", "140v"))
+        or ("graphics" in gpu_l)
+    )
+
+    is_high_end = not is_igpu and not is_pcie_bandwidth_bottleneck and any(
+        x in gpu_l for x in (
+            "5090", "5080", "5070", "4090", "4080", "4070", "3090", "3080", "3070",
+            "7900", "7800", "6950", "6900", "6800", "9060", "9070", "9080", "xtx"
+        )
+    )
+
+    settings: dict[str, Any] = {
+        "render_path": "auto",
+        "lamp_glare": 1.0,
+    }
+    summary: list[str] = []
+
+    # SPU Block Size
+    if ram_gb < 7.0:
+        settings["spu_block_size"] = "Safe"
+        summary.append(f"RAM ({ram_gb:.0f} GB) -> SPU Block Size: Safe (low compiler memory)")
+    else:
+        settings["spu_block_size"] = "Mega"
+        summary.append(f"RAM ({ram_gb:.0f} GB) -> SPU Block Size: Mega (optimal GT6 thread pacing)")
+
+    # Thread Scheduler
+    if is_intel_hybrid:
+        settings["thread_scheduler"] = "RPCS3 Alternative Scheduler"
+        summary.append(f"CPU ({cpu_name}) -> RPCS3 Alternative Scheduler (avoids E-core thread stalls)")
+    else:
+        settings["thread_scheduler"] = "Operating System"
+        summary.append(f"CPU ({cpu_name}, {threads} threads) -> OS Thread Scheduler")
+
+    # GPU & Visuals
+    display_gpu = gpu_name or "Integrated Graphics"
+    if is_pcie_bandwidth_bottleneck:
+        settings["render_path"] = "cpu_blit"
+        settings["output_resolution"] = "1920x1080"
+        settings["resolution_scale"] = 100
+        settings["upscaler"] = "fsr"
+        settings["cas_sharpening"] = 60
+        settings["shadows"] = "sharp"
+        settings["aa"] = "off"
+        settings["lamp_glare"] = 0.0
+        settings["strict_rendering"] = False
+        board_desc = "B450 / PCIe 3.0" if (is_pcie3_board or "b450" in dmi_l) else "PCIe 3.0 x8 bus"
+        summary.append(
+            f"GPU ({display_gpu}) on {board_desc} -> PCIe Bottleneck Fix (Issue #36): "
+            f"Force CPU Blit + Speedboost, 1080p, 100% Scale + FSR, MLAA Off, Glare 0 (solid 60 FPS)"
+        )
+    elif is_igpu:
+        settings["output_resolution"] = "1280x720"
+        settings["resolution_scale"] = 100
+        settings["upscaler"] = "fsr"
+        settings["cas_sharpening"] = 60
+        settings["shadows"] = "stock"
+        settings["aa"] = "mlaa_sharp"
+        settings["strict_rendering"] = False
+        summary.append(f"GPU ({display_gpu}) -> Handheld/iGPU: 720p, 100% Scale + FSR 1, Stock Shadows")
+    elif is_high_end:
+        settings["output_resolution"] = "1920x1080"
+        settings["resolution_scale"] = 200
+        settings["upscaler"] = "bilinear"
+        settings["shadows"] = "sharp"
+        # Keep MLAA on: "Disable MLAA" combined with resolution scale > 100% shows a green band / green
+        # image on 1.22 (Issues #36, #39).
+        settings["aa"] = "mlaa_sharp"
+        settings["strict_rendering"] = is_amd
+        amd_fix = ", Strict Rendering: ON (fixes AMD hood reflection/strobe)" if is_amd else ""
+        summary.append(f"GPU ({display_gpu}) -> High-End: 1080p output, 200% Scale + Sharper MLAA, "
+                       f"Sharp Shadows{amd_fix}")
+    else:
+        settings["output_resolution"] = "1920x1080"
+        settings["resolution_scale"] = 150
+        settings["upscaler"] = "bilinear"
+        settings["shadows"] = "sharp"
+        settings["aa"] = "mlaa_sharp"
+        settings["strict_rendering"] = is_amd
+        amd_fix = ", Strict Rendering: ON (fixes AMD hood reflection/strobe)" if is_amd else ""
+        summary.append(f"GPU ({display_gpu}) -> Mid-Range: 1080p output, 150% Scale, Sharp Shadows{amd_fix}")
+
+    # Core stability settings
+    # ZCull queries off: with them on, the car delivery / part install screens stall at 1-5 fps
+    # (RSX semaphore_acquire timeouts, Issues #40, #42). RPCS3 wiki / AlexHaust recommendation.
+    settings["zcull_queries_disabled"] = True
+    settings["zcull_accuracy"] = "Approximate"
+    settings["accurate_rsx_reservation"] = True
+    settings["handle_tiled_memory"] = True
+    settings["multithreaded_rsx"] = False
+    settings["unlock_menu_fps"] = True
+
+    return settings, summary
 
 
 @dataclass
@@ -154,9 +505,11 @@ class Settings:
     # emulation
     renderer: str = "Vulkan"
     gpu_adapter: str = ""            # empty = RPCS3 default
-    spu_block_size: str = "Safe"
+    spu_block_size: str = field(default_factory=default_spu_block_size)
     thread_scheduler: str = "Operating System"
-    zcull_queries_disabled: bool = True
+    zcull_queries_disabled: bool = True   # see auto-config note (Issues #40, #42)
+    strict_rendering: bool = False
+    zcull_accuracy: str = "Approximate"
     render_path: str = "auto"       # never all three of WCB/RCB/CPU blit together (RPCS3 wiki)
     accurate_rsx_reservation: bool = True
     multithreaded_rsx: bool = False
@@ -164,6 +517,7 @@ class Settings:
     # GT6 binds tiled RSX memory (cellGcmSetTile); without this the race standings/name
     # strip and other HUD text can show coloured noise blocks
     handle_tiled_memory: bool = True
+    audio_format: str = "Stereo"
     audio_time_stretch: bool = True   # smooth audio through short FPS dips (intro/name screen)
     audio_buffer_ms: int = 50
     # controller: auto = first connected gamepad (else keyboard), pad = controller_device,
@@ -174,9 +528,12 @@ class Settings:
     wheel_enabled: bool = False
     wheel_name: str = ""
     wheel_mapping: dict[str, Any] = field(default_factory=dict)
+    wheel_reverse_ffb: bool = False
     # extras
     use_gamemode: bool = False
     use_mangohud: bool = False
+    # UI language for launcher
+    ui_language: str = "en"
     # console region/language: region follows the disc; GT6 picks default units (km/h vs mph)
     # and the EU disc its text language from these
     console_language: str = "auto"
@@ -292,6 +649,9 @@ def build_custom_config(s: Settings, version: str | None, title_id: str = "") ->
         "Read Color Buffers": cb,
         "Stretch To Display Area": ASPECTS.get(s.aspect) is not None,
         "Disable ZCull Occlusion Queries": s.zcull_queries_disabled,
+        "Strict Rendering Mode": s.strict_rendering,
+        "Relaxed ZCULL Sync": s.zcull_accuracy == "Relaxed",
+        "Accurate ZCULL stats": s.zcull_accuracy == "Precise",
         "Force CPU Blit": cpu_blit,
         "Handle RSX Memory Tiling": s.handle_tiled_memory,
         "Multithreaded RSX": s.multithreaded_rsx,
@@ -318,6 +678,7 @@ def build_custom_config(s: Settings, version: str | None, title_id: str = "") ->
         },
         "Video": video,
         "Audio": {
+            "Audio Format": s.audio_format,
             "Enable Buffering": True,
             "Desired Audio Buffer Duration": s.audio_buffer_ms,
             "Enable Time Stretching": s.audio_time_stretch,
@@ -363,6 +724,13 @@ def desired_patches(s: Settings, version: str | None) -> dict[str, dict[str, flo
         want["Use Sharper MLAA - Strong"] = {}
     elif s.aa == "off":
         want["Disable MLAA"] = {}
+    if s.render_path == "cpu_blit":
+        # Force CPU Blit on GT6 1.22: bypasses PCIe Write Color Buffer readback bottleneck (Issue #36).
+        # Requires Speedboost and Disable MLAA patches to avoid black 3D world and broken crowd sprites.
+        want["Speedboost (disable Write Color Buffers)"] = {}
+        want["Disable MLAA"] = {}
+        want.pop("Use Sharper MLAA", None)
+        want.pop("Use Sharper MLAA - Strong", None)
     ratio = ASPECTS.get(s.aspect)
     if ratio:
         want["Aspect Ratio"] = {"Aspect Ratio": ratio}
@@ -429,4 +797,5 @@ _CHOICES.update({
     "frame_mode": FRAME_MODES, "motion_blur": MOTION_BLUR, "shadows": SHADOWS, "spu_block_size": SPU_BLOCK,
     "thread_scheduler": SCHEDULERS, "render_path": RENDER_PATHS, "output_resolution": OUTPUT_RESOLUTIONS,
     "console_language": LANGUAGES, "controller_mode": ["auto", "pad", "keyboard", "manual"],
+    "zcull_accuracy": ZCULL_ACCURACY,
 })

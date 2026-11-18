@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import urllib.request
 from dataclasses import dataclass, field, asdict
@@ -217,12 +218,78 @@ def update_sources(progress=None) -> list[str]:
     return results
 
 
+def _higher_patch_versions() -> dict[tuple[str, str], str]:
+    """Return {(ppu_hash, name): bumped_version} for imported_patch.yml entries shadowed by patch.yml.
+
+    RPCS3 resolves duplicate (hash, name) entries across files by highest Patch Version.
+    For example, patch.yml ships digant73's Disable MLAA (v3.11), which overrides AlexHaust's
+    Disable MLAA (v1.0) in imported_patch.yml and causes green glare/bloom when combined with
+    AlexHaust's resolution-scale fixes (Issues #36, #39).
+    """
+    try:
+        idx = load_index()
+    except Exception:
+        return {}
+    official_max: dict[tuple[str, str], float] = {}
+    imported: dict[tuple[str, str], float] = {}
+    for p in idx:
+        try:
+            ver = float(p.patch_version or 0.0)
+        except ValueError:
+            ver = 0.0
+        key = (p.hash, p.name)
+        if p.source == "patch.yml":
+            official_max[key] = max(official_max.get(key, -1.0), ver)
+        elif p.source == "imported_patch.yml":
+            imported[key] = max(imported.get(key, -1.0), ver)
+    bumps: dict[tuple[str, str], str] = {}
+    for key, imp_ver in imported.items():
+        off_ver = official_max.get(key)
+        if off_ver is not None and off_ver >= imp_ver:
+            bumps[key] = f"{int(off_ver) + 1}.0"
+    return bumps
+
+
+def _apply_patch_version_bumps(text: str, bumps: dict[tuple[str, str], str]) -> str:
+    if not bumps:
+        return text
+    out: list[str] = []
+    cur_hash = ""
+    cur_name = ""
+    for line in text.splitlines(keepends=True):
+        m_hash = re.match(r"^(PPU-[0-9a-fA-F]+):\s*$", line)
+        if m_hash:
+            cur_hash = m_hash.group(1)
+            cur_name = ""
+        elif line and not line[0].isspace():
+            cur_hash = ""
+            cur_name = ""
+        elif cur_hash:
+            m_name = re.match(r'^\s{2}(?:"([^"]+)"|\'([^\']+)\'|([^:\s][^:]*)):\s*$', line)
+            if m_name:
+                cur_name = m_name.group(1) or m_name.group(2) or m_name.group(3) or ""
+            elif cur_name and (cur_hash, cur_name) in bumps:
+                m_ver = re.match(r"^(\s{4}Patch Version:\s*).*?(\r?\n?)$", line)
+                if m_ver:
+                    line = f"{m_ver.group(1)}{bumps[(cur_hash, cur_name)]}{m_ver.group(2)}"
+        out.append(line)
+    return "".join(out)
+
+
 def install_patch_files(rpcs3_cfg_dir: str, extra_title_files: dict[str, str]) -> None:
     """Copy patch databases into RPCS3's patches folder."""
     dst = os.path.join(rpcs3_cfg_dir, "patches")
     os.makedirs(dst, exist_ok=True)
+    bumps = _higher_patch_versions()
     for f in patch_files():
-        shutil.copy2(f, os.path.join(dst, os.path.basename(f)))
+        bn = os.path.basename(f)
+        out_path = os.path.join(dst, bn)
+        if bn == "imported_patch.yml" and bumps:
+            with open(f, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            atomic_write(out_path, _apply_patch_version_bumps(text, bumps))
+        else:
+            shutil.copy2(f, out_path)
     for fn, text in extra_title_files.items():
         atomic_write(os.path.join(dst, fn), text)
 
