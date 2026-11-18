@@ -48,6 +48,16 @@ if ($env:GT6L_BUNDLE_RPCS3_DIR) {
     if (-not (Test-Path (Join-Path $EmuDir "rpcs3.exe"))) { throw "rpcs3.exe missing after extraction" }
 }
 $SdlDll = Get-ChildItem -Recurse $EmuDir -Filter SDL3.dll | Select-Object -First 1
+if (-not $SdlDll) {
+    # The GT6-patched RPCS3 is built from source with SDL linked statically, so it ships no SDL3.dll.
+    # Use the official release of the same SDL version as RPCS3's 3rdparty/libsdl-org/SDL submodule at eee3f0f7c
+    # (f00dc919c = "Updated to version 3.4.20 for release"), so device names still match the emulator's.
+    $SdlVer = "3.4.20"
+    $SdlZip = Join-Path $Work "sdl3.zip"
+    Invoke-WebRequest "https://github.com/libsdl-org/SDL/releases/download/release-$SdlVer/SDL3-$SdlVer-win32-x64.zip" -OutFile $SdlZip
+    Expand-Archive $SdlZip -DestinationPath (Join-Path $Work "sdl3") -Force
+    $SdlDll = Get-ChildItem -Recurse (Join-Path $Work "sdl3") -Filter SDL3.dll | Select-Object -First 1
+}
 if (-not $SdlDll) { throw "SDL3.dll is missing from the bundled RPCS3 build; wheel calibration must use the emulator's SDL version." }
 
 # 4. PyInstaller (windowed; CLI sub-commands still work from a console)
