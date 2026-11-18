@@ -101,6 +101,15 @@ ENGINE_COLOR = {
     "cge_chroma": "Engine Chroma",
 }
 GRADING_SLIDERS = {**COLOR_GRADING, **ENGINE_COLOR}
+# Cockpit head motion (head_motion.py game patch + GT6-patched RPCS3 patch 16): setting key -> RPCS3
+# "Video/Head Motion" key, with its range. Also editable live in the in-game home menu (Settings -> Head Motion).
+HEAD_MOTION = {
+    "hm_strength": ("Strength", 1, 20),
+    "hm_braking": ("Braking Nod", 0, 300),
+    "hm_lean": ("Cornering Lean", 0, 300),
+    "hm_turn": ("Cornering Turn", 0, 300),
+    "hm_slide": ("Head Slide", 0, 300),
+}
 SCHEDULERS = ["Operating System", "RPCS3 Scheduler", "RPCS3 Alternative Scheduler"]
 ZCULL_ACCURACY = ["Approximate", "Relaxed", "Precise"]
 
@@ -490,6 +499,10 @@ class Settings:
     # Cockpit head motion from G-forces (head_motion.py game patch)
     head_motion: bool = False
     hm_strength: int = 5
+    hm_braking: int = 100
+    hm_lean: int = 100
+    hm_turn: int = 100
+    hm_slide: int = 100
     # GT6's own color correction (game patch), see ENGINE_COLOR
     engine_color: bool = False
     cge_gain_r: int = 0
@@ -562,6 +575,11 @@ class Settings:
                 setattr(s, k, max(-100, min(100, int(getattr(s, k)))))
             except (TypeError, ValueError):
                 setattr(s, k, 0)
+        for k, (_rk, lo, hi) in HEAD_MOTION.items():
+            try:
+                setattr(s, k, max(lo, min(hi, int(getattr(s, k)))))
+            except (TypeError, ValueError):
+                setattr(s, k, getattr(default, k))
         for f in fields(cls):
             dv = getattr(default, f.name)
             v = getattr(s, f.name)
@@ -630,6 +648,30 @@ def color_grading_from_config(node: Any) -> dict[str, Any]:
     return out
 
 
+def head_motion_config(s: Settings) -> dict[str, Any]:
+    """RPCS3 ``Video/Head Motion`` node (only read by the GT6-patched build, ignored by stock RPCS3)."""
+    return {rk: int(getattr(s, k)) for k, (rk, _lo, _hi) in HEAD_MOTION.items()}
+
+
+def head_motion_from_config(node: Any) -> dict[str, Any]:
+    """Inverse of :func:`head_motion_config` (the in-game home menu saves into the per-game config)."""
+    if not isinstance(node, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for k, (rk, lo, hi) in HEAD_MOTION.items():
+        try:
+            out[k] = max(lo, min(hi, int(str(node.get(rk)).strip())))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def ingame_settings_from_config(video: Any) -> dict[str, Any]:
+    """Settings the in-game home menu can change, read back from a per-game config's Video node."""
+    video = video if isinstance(video, dict) else {}
+    return {**color_grading_from_config(video.get("Color Grading")), **head_motion_from_config(video.get("Head Motion"))}
+
+
 def build_custom_config(s: Settings, version: str | None, title_id: str = "") -> dict[str, Any]:
     """RPCS3 per-game config (only the keys we care about; RPCS3 fills the rest)."""
     cb, cpu_blit = render_flags(s, version)
@@ -663,6 +705,7 @@ def build_custom_config(s: Settings, version: str | None, title_id: str = "") ->
         "Performance Overlay": {"Enabled": s.performance_overlay, "Enable Framerate Graph": s.performance_overlay,
                                 "Enable Frametime Graph": s.performance_overlay, "Detail level": "Medium"},
         "Color Grading": color_grading_config(s),
+        "Head Motion": head_motion_config(s),
     }
     if s.gpu_adapter:
         video["Vulkan"]["Adapter"] = s.gpu_adapter

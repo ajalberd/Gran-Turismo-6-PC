@@ -1,0 +1,233 @@
+diff --git a/rpcs3/Emu/RSX/GL/GLPresent.cpp b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+index 9d58fb15c..b928ae127 100644
+--- a/rpcs3/Emu/RSX/GL/GLPresent.cpp
++++ b/rpcs3/Emu/RSX/GL/GLPresent.cpp
+@@ -11,6 +11,7 @@
+ #include "Emu/RSX/Overlays/overlay_mouse_input.h"
+ #include "Emu/RSX/gt6_engine_color.h"
+ #include "Emu/RSX/gt6_live_bridge.h"
++#include "Emu/RSX/gt6_head_motion.h"
+ 
+ #include "util/video_provider.h"
+ 
+@@ -298,6 +299,7 @@ bool GLGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	// GT6: overlay mouse mapping and live engine color correction
+ 	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
+ 	rsx::gt6::update_engine_color();
++	rsx::gt6::update_head_motion();
+ 	rsx::gt6::update_live_bridge();
+ 
+ 	if (!image_to_flip || aspect_ratio.x1 || aspect_ratio.y1)
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+index 3f6af44c8..279ed04ea 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.cpp
+@@ -2,6 +2,7 @@
+ #include "overlay_home_menu_settings.h"
+ #include "Emu/system_config.h"
+ #include "Emu/RSX/gt6_engine_color.h"
++#include "Emu/RSX/gt6_head_motion.h"
+ 
+ namespace rsx
+ {
+@@ -17,6 +18,7 @@ namespace rsx
+ 			add_page(home_menu::fa_icon::audio, std::make_shared<home_menu_settings_audio>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::video, std::make_shared<home_menu_settings_video>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::settings_sliders, std::make_shared<home_menu_settings_color>(x, y, width, height, use_separators, nullptr));
++			add_page(home_menu::fa_icon::video, std::make_shared<home_menu_settings_head_motion>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::gamepad, std::make_shared<home_menu_settings_input>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::settings, std::make_shared<home_menu_settings_advanced>(x, y, width, height, use_separators, nullptr));
+ 			add_page(home_menu::fa_icon::settings_sliders, std::make_shared<home_menu_settings_overlays>(x, y, width, height, use_separators, nullptr));
+@@ -268,6 +270,21 @@ namespace rsx
+ 			apply_layout();
+ 		}
+ 
++		home_menu_settings_head_motion::home_menu_settings_head_motion(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
++			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION))
++		{
++			// GT6 cockpit head motion: applied live by Emu/RSX/gt6_head_motion.h while the launcher's game patch is active.
++			// Select resets a slider. Strength scales the response to G; the others are % of GT6's own gains.
++			auto& hm = g_cfg.video.head_motion;
++			add_signed_slider(&hm.strength, localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_STRENGTH, " x", 1);
++			add_signed_slider(&hm.braking, localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_BRAKING, " %", 5);
++			add_signed_slider(&hm.lean, localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_LEAN, " %", 5);
++			add_signed_slider(&hm.turn, localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_TURN, " %", 5);
++			add_signed_slider(&hm.slide, localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_SLIDE, " %", 5);
++
++			apply_layout();
++		}
++
+ 		home_menu_settings_advanced::home_menu_settings_advanced(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
+ 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_ADVANCED))
+ 		{
+diff --git a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+index 4a912e29d..72381177a 100644
+--- a/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
++++ b/rpcs3/Emu/RSX/Overlays/HomeMenu/overlay_home_menu_settings.h
+@@ -350,6 +350,11 @@ namespace rsx
+ 			home_menu_settings_color(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+ 		};
+ 
++		struct home_menu_settings_head_motion : public home_menu_settings_page
++		{
++			home_menu_settings_head_motion(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
++		};
++
+ 		struct home_menu_settings_advanced : public home_menu_settings_page
+ 		{
+ 			home_menu_settings_advanced(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 55e25b121..e5af10529 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -8,6 +8,7 @@
+ #include "Emu/RSX/Overlays/overlay_mouse_input.h"
+ #include "Emu/RSX/gt6_engine_color.h"
+ #include "Emu/RSX/gt6_live_bridge.h"
++#include "Emu/RSX/gt6_head_motion.h"
+ #include "Emu/Cell/Modules/cellVideoOut.h"
+ 
+ #include "upscalers/bilinear_pass.hpp"
+@@ -674,6 +675,7 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	// GT6: overlay mouse mapping and live engine color correction
+ 	rsx::overlays::g_mouse_input.set_area(aspect_ratio.x1, aspect_ratio.y1, aspect_ratio.width(), aspect_ratio.height());
+ 	rsx::gt6::update_engine_color();
++	rsx::gt6::update_head_motion();
+ 	rsx::gt6::update_live_bridge();
+ 
+ 	// Blit contents to screen..
+diff --git a/rpcs3/Emu/RSX/gt6_head_motion.h b/rpcs3/Emu/RSX/gt6_head_motion.h
+new file mode 100644
+index 000000000..5b9d23fc8
+--- /dev/null
++++ b/rpcs3/Emu/RSX/gt6_head_motion.h
+@@ -0,0 +1,71 @@
++#pragma once
++
++// GT6: live tuning of the cockpit head motion (EU 1.22 EMAIN).
++//
++// The launcher's "Cockpit Head Motion" game patch makes GT6's crash-reaction neck rig (GTCamera::ImpactBlurCamera:
++// head slide, pitch, yaw and roll around a neck pivot) follow the car's acceleration while driving. It also redirects
++// the yaw and head-slide gain loads, which share their constants with other cameras, to two floats of its own.
++// While that patch is present, the emulator rewrites the gains and the input scale every frame from
++// Video/Head Motion/*, so the home menu sliders change the motion live.
++// Reverse-engineering notes: docs/re/gt6-head-motion.md in the GT6 launcher repository.
++
++#include "Emu/System.h"
++#include "Emu/system_config.h"
++#include "Emu/Memory/vm.h"
++
++namespace rsx::gt6
++{
++	constexpr u32 hm_gate = 0x002F949C;            // b 0x2F950C (stock: lbz r0, 0x1e4(r31), collision gate)
++	constexpr u32 hm_gate_word = 0x48000070;
++	constexpr u32 hm_yaw_load = 0x002F9634;        // lfs f1, -0x7c0(r9) with r9 = 0x1560000 (stock: lfs f1, 0xac(r9))
++	constexpr u32 hm_yaw_load_word = 0xC029F840;
++
++	constexpr u32 hm_clamp_min = 0x0113007C;       // -normaliser: input = clamp(acceleration) / normaliser
++	constexpr u32 hm_clamp_max = 0x01130080;       // +normaliser
++	constexpr u32 hm_pitch = 0x011300A8;           // pitch gain (only used by this rig)
++	constexpr u32 hm_roll = 0x011300B0;            // roll gain (only used by this rig)
++	constexpr u32 hm_yaw = 0x0155F840;             // yaw gain (patch's own slot)
++	constexpr u32 hm_slide = 0x0155F844;           // head slide gain (patch's own slot)
++
++	// GT6's stock values. Must match gt6launcher/head_motion.py.
++	constexpr f32 hm_stock_normaliser = 500.f;
++	constexpr f32 hm_stock_pitch = -1.0471976f;
++	constexpr f32 hm_stock_roll = 0.87266463f;
++	constexpr f32 hm_stock_yaw = 1.3962634f;
++	constexpr f32 hm_stock_slide = -10.f;
++
++	inline bool head_motion_patch_active()
++	{
++		if (Emu.GetTitleID() != "BCES01893")
++		{
++			return false;
++		}
++
++		if (!vm::check_addr(hm_gate, vm::page_readable, 4) || !vm::check_addr(hm_yaw_load, vm::page_readable, 4) ||
++			!vm::check_addr(hm_clamp_min, vm::page_readable, 0x38) || !vm::check_addr(hm_yaw, vm::page_readable, 8))
++		{
++			return false;
++		}
++
++		return vm::read32(hm_gate) == hm_gate_word && vm::read32(hm_yaw_load) == hm_yaw_load_word;
++	}
++
++	// Called once per presented frame
++	inline void update_head_motion()
++	{
++		if (!head_motion_patch_active())
++		{
++			return;
++		}
++
++		const auto& hm = g_cfg.video.head_motion;
++		const f32 normaliser = hm_stock_normaliser / static_cast<f32>(std::max<s64>(1, hm.strength.get()));
++
++		*vm::get_super_ptr<f32>(hm_clamp_min) = -normaliser;
++		*vm::get_super_ptr<f32>(hm_clamp_max) = normaliser;
++		*vm::get_super_ptr<f32>(hm_pitch) = hm_stock_pitch * static_cast<f32>(hm.braking.get()) / 100.f;
++		*vm::get_super_ptr<f32>(hm_roll) = hm_stock_roll * static_cast<f32>(hm.lean.get()) / 100.f;
++		*vm::get_super_ptr<f32>(hm_yaw) = hm_stock_yaw * static_cast<f32>(hm.turn.get()) / 100.f;
++		*vm::get_super_ptr<f32>(hm_slide) = hm_stock_slide * static_cast<f32>(hm.slide.get()) / 100.f;
++	}
++}
+diff --git a/rpcs3/Emu/localized_string_id.h b/rpcs3/Emu/localized_string_id.h
+index a1adb1e88..77e3bba26 100644
+--- a/rpcs3/Emu/localized_string_id.h
++++ b/rpcs3/Emu/localized_string_id.h
+@@ -258,6 +258,12 @@ enum class localized_string_id
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_G,
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_B,
+ 	HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_CHROMA,
++	HOME_MENU_SETTINGS_HEAD_MOTION,
++	HOME_MENU_SETTINGS_HEAD_MOTION_STRENGTH,
++	HOME_MENU_SETTINGS_HEAD_MOTION_BRAKING,
++	HOME_MENU_SETTINGS_HEAD_MOTION_LEAN,
++	HOME_MENU_SETTINGS_HEAD_MOTION_TURN,
++	HOME_MENU_SETTINGS_HEAD_MOTION_SLIDE,
+ 	HOME_MENU_SETTINGS_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT,
+ 	HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED,
+diff --git a/rpcs3/Emu/system_config.h b/rpcs3/Emu/system_config.h
+index 35e0b18ce..5ebfc8a28 100644
+--- a/rpcs3/Emu/system_config.h
++++ b/rpcs3/Emu/system_config.h
+@@ -220,6 +220,19 @@ struct cfg_root : cfg::node
+ 
+ 		} color_grading{ this };
+ 
++		// GT6: cockpit head motion (needs the launcher's head motion game patch), see Emu/RSX/gt6_head_motion.h
++		struct node_head_motion : cfg::node
++		{
++			node_head_motion(cfg::node* _this) : cfg::node(_this, "Head Motion") {}
++
++			cfg::_int<1, 20> strength{ this, "Strength", 5, true };          // x stock response to G
++			cfg::_int<0, 300> braking{ this, "Braking Nod", 100, true };      // % of GT6's pitch gain
++			cfg::_int<0, 300> lean{ this, "Cornering Lean", 100, true };      // % of GT6's roll gain
++			cfg::_int<0, 300> turn{ this, "Cornering Turn", 100, true };      // % of GT6's yaw gain
++			cfg::_int<0, 300> slide{ this, "Head Slide", 100, true };         // % of GT6's head translation gain
++
++		} head_motion{ this };
++
+ 		struct node_vk : cfg::node
+ 		{
+ 			node_vk(cfg::node* _this) : cfg::node(_this, "Vulkan") {}
+diff --git a/rpcs3/rpcs3qt/localized_emu.h b/rpcs3/rpcs3qt/localized_emu.h
+index 072bf7bf6..613dc31de 100644
+--- a/rpcs3/rpcs3qt/localized_emu.h
++++ b/rpcs3/rpcs3qt/localized_emu.h
+@@ -279,6 +279,12 @@ private:
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_G: return tr("GT6 Gamma - Green", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_GAMMA_B: return tr("GT6 Gamma - Blue", "Color");
+ 		case localized_string_id::HOME_MENU_SETTINGS_COLOR_GRADING_ENGINE_CHROMA: return tr("GT6 Chroma (saturation)", "Color");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION: return tr("Head Motion");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_STRENGTH: return tr("Strength (response to G)", "Head Motion");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_BRAKING: return tr("Braking / acceleration nod", "Head Motion");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_LEAN: return tr("Cornering lean (roll)", "Head Motion");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_TURN: return tr("Cornering turn (yaw)", "Head Motion");
++		case localized_string_id::HOME_MENU_SETTINGS_HEAD_MOTION_SLIDE: return tr("Head slide", "Head Motion");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT: return tr("Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_BACKGROUND_INPUT: return tr("Background Input Enabled", "Input");
+ 		case localized_string_id::HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED: return tr("Keep Pads Connected", "Input");

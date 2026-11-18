@@ -275,8 +275,7 @@ class Core:
         # The launcher owns this file: write it fresh (a merge would keep stale keys such as
         # Process ARGV "lanmode" or a previously chosen GPU adapter after they were switched off).
         atomic_write(paths.custom_config_file(tid), dump_cfg(custom))
-        self.data.setdefault("cg_written", {})[tid] = profile_mod.color_grading_from_config(
-            custom["Video"]["Color Grading"])
+        self.data.setdefault("cg_written", {})[tid] = profile_mod.ingame_settings_from_config(custom["Video"])
         self.save()
         # patches
         for msg in patches.ensure_sources():  # first start: fetch the patch databases
@@ -295,7 +294,7 @@ class Core:
         return [p.name for p, _ in selection]
 
     def sync_ingame_color_grading(self, tid: str) -> bool:
-        """Adopt color grading saved from the in-game home menu (Settings -> Color, Save).
+        """Adopt color grading and head motion saved from the in-game home menu (Settings, Save).
 
         RPCS3 saves it into the per-game config, which the launcher regenerates on every start.
         Values that differ from what the launcher last wrote there were changed in game and win;
@@ -307,7 +306,7 @@ class Core:
             cfg = load_cfg(paths.custom_config_file(tid))
         except Exception:  # noqa: BLE001 - a broken file is simply rewritten
             return False
-        found = profile_mod.color_grading_from_config((cfg.get("Video") or {}).get("Color Grading"))
+        found = profile_mod.ingame_settings_from_config(cfg.get("Video"))
         if not found or found == written:
             return False
         # only the values changed in game: a slider moved in the launcher since then keeps its value

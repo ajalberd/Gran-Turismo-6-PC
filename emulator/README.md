@@ -20,6 +20,7 @@ patches in [`gt6-patches/`](gt6-patches), applied in order:
 | `13-home-menu-compact-slider` | Home menu: Cross or a click on a slider opens a compact adjust view: the menu and its dimming disappear and one slider bar sits at the bottom of the live picture (like a TV's brightness OSD). Left/Right, mouse drag or wheel adjust; Up/Down switch to the neighbouring slider; Select resets; Circle, right click or a click on the picture returns to the menu. |
 | `14-pause-after-draw` | Home menu sometimes not drawn at all (game looks frozen) when it pauses the game: a pause that arrived between BEGIN and END parked the RSX thread mid-draw, where native UI flips are refused. The RSX thread now finishes the open draw before honouring a plain pause. |
 | `15-live-memory-bridge` | Developer tool for reverse engineering (camera, physics): while `<config>/gt6_live.txt` exists, its commands are run every 200 ms (read/write game memory, pointer expressions like `[[0x16b6e98]+0x10]+0x54`) and results go to `gt6_live_out.txt`. Data only; does nothing when the file is absent. See `Emu/RSX/gt6_live_bridge.h`. |
+| `16-head-motion-live` | GT6 cockpit head motion, live: while the launcher's *Cockpit Head Motion* game patch is active, the response strength and the braking-nod / lean / turn / head-slide gains are rewritten every frame from the new `Video/Head Motion` config node, with a **Head Motion** tab in the home menu's Settings. |
 
 Patches 01–05 started from abowen's GT6 RPCS3 research and were rebased onto the current upstream.
 

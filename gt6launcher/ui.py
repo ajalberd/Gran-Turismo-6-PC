@@ -857,6 +857,20 @@ class MainWindow(QMainWindow):
         sp.valueChanged.connect(lambda n: self._set("hm_strength", n))
         self.ctl["hm_strength"] = sp
         f.addRow("Head motion strength", sp)
+        for key, txt, tip in (
+                ("hm_braking", "  Braking / acceleration nod", "Head pitch from braking and acceleration."),
+                ("hm_lean", "  Cornering lean (roll)", "Head tilt in corners."),
+                ("hm_turn", "  Cornering turn (yaw)", "Head turn in corners."),
+                ("hm_slide", "  Head slide", "Sideways and fore/aft head movement.")):
+            sp = QSpinBox()
+            sp.setRange(0, 300)
+            sp.setSingleStep(10)
+            sp.setSuffix(" %")
+            sp.setToolTip(tip + " Percent of GT6's own amount; also adjustable live in the home menu "
+                                "(Settings -> Head Motion).")
+            sp.valueChanged.connect(lambda n, k=key: self._set(k, n))
+            self.ctl[key] = sp
+            f.addRow(txt, sp)
         v.addWidget(g)
 
         g = QGroupBox("Emulation")
