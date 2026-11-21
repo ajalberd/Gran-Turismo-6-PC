@@ -818,6 +818,9 @@ def desired_patches(s: Settings, version: str | None) -> dict[str, dict[str, flo
     if s.lan_enabled:
         want["LAN Room Sync Without PSN"] = {}
         want["LAN Host Member Info"] = {}
+        # research probe (docs/re/gt6-lan-ai.md): inert until N is written via gt6_live.txt
+        from . import lan_ai_probe
+        want[lan_ai_probe.PATCH_NAME] = {}
     if s.online_enabled and not s.lan_enabled:
         want[ONLINE_PATCH] = {}
     # user extras override
