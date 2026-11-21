@@ -125,7 +125,9 @@ The user drives; you watch logs and memory.
 
 ## 9. Research question: AI cars in LAN / online races
 
-**Status: unexplored beyond string recon (2026-11-21). Nothing built.**
+**Status (2026-11-21): static RE done, see `docs/re/gt6-lan-ai.md` (verdict: host-simulated AI entries
+through GT6's own network entry path is the way; a small game-patch probe is designed but not built).
+The notes below are the earlier string-level recon.**
 
 What the binary shows (EMAIN 1.22):
 
