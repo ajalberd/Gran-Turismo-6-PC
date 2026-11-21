@@ -221,6 +221,26 @@ Expected outcomes:
 Step 2 risk: AI may not drive in a network race if the course AI lines aren't loaded. If the car sits
 still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for online races.
 
+## Test log
+
+* **Run 1 (build with block at 0x155E000):** the host crashed on entering the online lobby, with a write fault
+  in the cave. Fixed in `1360cd5` (block moved to `0x17FB000`). So `Race::entry` already runs on lobby
+  entry.
+* **Run 2 (1360cd5, host alone, N = 0):** the host reached the lobby. About 40 s later the emulator froze
+  with `VM: Access violation writing location 0x42e71d00 (unmapped memory)` in memcpy `0xc5a510`,
+  called from `0x4b5db8`, which copies 0x68 bytes into `*(obj)`. The call stack is `0x4b6168`
+  (walks a 32-slot ring, stride 0xE8 at obj+0x18 and 0xB8 at obj+4) <- `0xa08748` <- `0xa0c100` <- `0xaf7f24`.
+  That is the GTRace network-sync area. It looks like a stale pointer, not a probe effect:
+  * `requestEntry` `0x491298` takes `r3` = net and `r4..r7`, and returns 0/1 (`extsw`). The cave doesn't
+    touch `r3..r7` before the original call. It uses only volatile registers (`r0`, `r8..r12`, CTR, cr0)
+    and keeps a 0x80-byte ABI frame (the callee saves LR at +0x10, locals at +0x70..+0x7B). It leaves
+    `r2` alone, and the caller reloads everything it needs after the call (`mr r29,r3`).
+  * No code or data in EMAIN refers to `0x17F9578..0x1800000`, counting each register's first use after
+    `lis` and data words in the data segment. The TOC window ends at `0x164CF38`.
+  * With N = 0 the cave adds only reads of the blob and writes to its own block.
+  * Still to do: a run with the probe unchecked on the launcher's Patches tab, to see whether the
+    freeze also happens with stock code (host alone in the lobby).
+
 ## Test setup: two PCs on the same LAN
 
 The two-RPCS3-instances-on-one-PC plan was dropped because a second PC is available.
