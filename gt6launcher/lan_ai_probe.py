@@ -5,7 +5,7 @@ layer (``requestEntry`` 0x491298, called at 0x47EB24) to publish the entry (STim
 VehicleSettingObject / VehiclePacket / NetworkEntryInfo), and every machine then builds the slot.
 
 This patch puts a code cave on that call. It always makes the original call, records what it saw in a
-small block at ``BASE`` (zero tail of the text page, outside the write-protected part) and, if the u32
+small block at ``BASE`` (unused tail of the RW data segment, past the end of .bss) and, if the u32
 ``BASE+0x00`` is N > 0 (set on the room host only, through the live bridge ``gt6_live.txt``), repeats
 the request N more times (max 8): with the same car setup blob, or with a copy of it in which one word
 is rewritten (``BASE+0x28`` byte offset != 0: word = (word & AND) | OR) - meant for switching the
@@ -28,7 +28,11 @@ VERIFIED_TITLES = {"BCES01893"}
 HOOK = 0x0047EB24          # bl 0x491298 (requestEntry) inside Race::entry
 HOOK_ORIG = 0x48012775
 REQUEST_ENTRY = 0x00491298
-BASE = 0x0155E000          # 0x1551000..0x155FFFF: mapped, writable, unused (0x155F800+ used by other patches)
+# Guest code writes this block, so it must be in the RW data segment: the data segment's memsz ends at
+# 0x17F9578 and RPCS3 maps it in 64K pages up to 0x1800000. (The text tail 0x1551000..0x155FFFF is
+# read-only for guest code - 0x155E000 crashed with "Access violation writing ... (read-only memory)".)
+# 0x17FB000..0x17FB7FF is clear of every lis/addi address in EMAIN that points past .bss.
+BASE = 0x017FB000
 COPY_OFF = 0x100
 COPY_MAX = 0x700
 MAX_EXTRA = 8
