@@ -238,8 +238,16 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   * No code or data in EMAIN refers to `0x17F9578..0x1800000`, counting each register's first use after
     `lis` and data words in the data segment. The TOC window ends at `0x164CF38`.
   * With N = 0 the cave adds only reads of the blob and writes to its own block.
-  * Still to do: a run with the probe unchecked on the launcher's Patches tab, to see whether the
-    freeze also happens with stock code (host alone in the lobby).
+* **Run 3 (1360cd5, solo LAN room, then the track, N = 0):** the `sgx-audio-thr` thread read a
+  garbage pointer, `0x10730121`, at `0xcb54dc` (LR `0xcaa8b8`). The probe block afterwards read
+  `00000000 4fe00ab0 42550000 0000045f 4fff40a0 00000001 00000001 00000000 4fd4e000 000000c0`. So there was
+  one hook call with a 0x45F-byte blob (copied to `0x17FB100..0x17FB55F`), `requestEntry` returned 1, and
+  there were no extras.
+  * RPCS3 maps the data segment with one `falloc` in 64K pages (`vm.cpp` `block_t::falloc`):
+    `0x1560000..0x17FFFFF` belongs to the segment. No PRX, HLE stub or patch cave can be placed there
+    (the probe's cave is at `0x18E0000`), and the loader only zero-fills filesz..memsz.
+* Still to do: the same solo run with the probe unchecked on the launcher's Patches tab, to see whether
+  these crashes also happen with stock code.
 
 ## Test setup: two PCs on the same LAN
 
