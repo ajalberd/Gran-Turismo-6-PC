@@ -226,7 +226,7 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
 * **Run 1 (build with block at 0x155E000):** the host crashed on entering the online lobby, with a write fault
   in the cave. Fixed in `1360cd5` (block moved to `0x17FB000`). So `Race::entry` already runs on lobby
   entry.
-* **Run 2 (1360cd5, host alone, N = 0):** the host reached the lobby. About 40 s later the emulator froze
+* **Run 2 (1360cd5, host alone, N = 0):** the host reached the lobby. At 0:02:03 of emulation the game froze
   with `VM: Access violation writing location 0x42e71d00 (unmapped memory)` in memcpy `0xc5a510`,
   called from `0x4b5db8`, which copies 0x68 bytes into `*(obj)`. The call stack is `0x4b6168`
   (walks a 32-slot ring, stride 0xE8 at obj+0x18 and 0xB8 at obj+4) <- `0xa08748` <- `0xa0c100` <- `0xaf7f24`.
