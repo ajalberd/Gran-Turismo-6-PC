@@ -315,6 +315,18 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
     older one. The actual vehicle creation goes through a handler, `[Race+0x1F8]` (build record `+0x2C`).
     An AI entry most likely gets its own car. Next: make the duplicate an AI driver through the probe's
     word rewrite (`+0x28` offset, `+0x2C` AND, `+0x30` OR), once the blob shows where DriverType is.
+* **Run 10 (09:47): entry blob dump** (0x45F bytes, from the probe copy at `0x17FB100`):
+  * `0x000..0x1FF`: car part. The second word, `0x22B7`, looks like a car code.
+  * Then **4 DriverParameter records of 0x98 bytes**, packed as `u16 0x70` (version) and `u16 0x98` (size),
+    followed by the type word. They start at bytes `0x201`, `0x299`, `0x331` and `0x3C9`. The in-memory
+    DriverParameter (0xC0 bytes, init `0xDF2A3C`) has `+0` = 0x70, `+4` = 0xC0 and `+8` = `0xF0FD0000`,
+    whose top nibble is DriverType (`isHuman` = nibble 0).
+  * All 4 records hold the default `f0 fd 00 00`: DriverType F = −1 (NONE). So in a network race,
+    "player" must follow from the LOCAL ControlType, not from this field.
+  * The word after the blob is 0.
+* **Run 11 setup:** the probe's rewrite sets record 0's DriverType to AI in the duplicate's blob copy
+  only: offset `0x204` (bytes `98 f0 fd 00`), AND `0xFF0FFFFF`, OR `0x00100000` → `9810fd00`. Bridge:
+  `w32! 0x17fb028 0x204 0xff0fffff 0x00100000`.
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
