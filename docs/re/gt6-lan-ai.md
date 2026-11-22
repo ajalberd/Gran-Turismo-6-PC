@@ -282,6 +282,16 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   result 1, **1 extra entry accepted** (the second `requestEntry` returned 1). The slot reads were not
   conclusive: ControlType 0 is also the value of an unused slot. Next run reads the slot-allocation
   chain (see "Slot allocation") with in-use flags `slot+0x4D8`, RM, the taken bytes and the ring indices.
+* **Run 7 (09:12, solo Trial Mountain, N = 1):** still no second car, but **the second entry got a slot**:
+  * host and my peer id both 0; `RM.owner[0] = RM.owner[1] = 0`, the rest `0xFFFF`; RM flags `01 01`;
+    queue rd = wr = 2, not closed
+  * taken bytes `impl+0x1648` = `01 01`, entry and command rings 2/2 (both done)
+  * slots 0 and 1 in use (`+0x4D8` = 1), both ControlType LOCAL, capacity 16
+  So `0x47EED0` ran for both. It loads the blob (`0x4A12F8`), calls `setControl`, fills the build record
+  `ctx+0xA24 + slot*0x38` (`+0x24` slot*, `+0x28` slot#, `+0x30` = 1 pending, `+0x34` Race), bumps
+  `Race+0x210` and queues the build task `0x47E52C` (OPD `0x16067F8`) on `ctx+0xA18`. The drop is
+  after that: the vehicle build, the grid / racer list, or the car is built but not placed. Next run
+  dumps both slots in full (436 words each) and both build records, to diff them.
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
