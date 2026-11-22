@@ -159,6 +159,27 @@ network layer, and every machine creates the slot when the entry shows up.
    * `slot.setControl(info+0x00 /*ControlType*/, race, info+0x1C)`: **LOCAL on the owner, NETWORK
      elsewhere**
    * then it queues the vehicle build (record at `ctx+0xA24 + slot*0x38`, task OPD `0x16067F8`).
+* **Slot allocation (found after probe run 6).** The owner never picks a slot. `0x4B0730` creates the
+  NetworkEntryInfo with slot field −1 (bits 9..15 of the u64 at info+0x20 = 0x7F, which reads as `0xFE00`).
+  Slots are then handed out per peer through a shared object, RM = `[impl+0x54]` (impl = `[net]`, where net
+  is the `requestEntry` r3):
+  * RM layout: `+0x00` u16 owner peer id of slots 0..31, `+0x80` byte flags[32], `+0xA0` u16 request
+    queue[32], `+0xE0` / `+0xE1` queue read / write index, `+0xE2` queue closed.
+  * NetworkEntryInfo create callback `0x4AFBA0` (OPD `0x1606FF8`, registered in `0x4B037C` for the 0x40-byte
+    type `impl+0x1FCC`): if the object is mine and objmgr `+0xB0` is true (I am the host), `push(impl, owner)`
+    runs (`0x4B4DF4`, skipped while `+0xE2` is set).
+  * Per tick `0x4B4240`: if host (`impl+0x1F98` == `impl+0x1F9C`), pop one queued peer and get a free slot
+    from `[impl+0x38]([impl+0x44])` = `0x478E98` → **`Race::allocSlot` `0x478D18`**. That function cycles over
+    `[[Race+0x18]+0x18]` slots and takes one that is not in use (`slot+0x4D8 == 0`) and not net-taken
+    (`0x48E92C` → `0x4B4C00`). Then `RM.owner[slot] = peer`.
+  * The same function, for my oldest pending entry record (ring at `[impl+0x1C]`, read/write
+    `impl+0x1B0C` / `+0x1B10`), waits until all three object ids are set (record obj `+0x1C/+0x1E/+0x20` != −1).
+    It then takes the first i with `RM.owner[i] == impl+0x1F9C` (my peer id) and `impl+0x1648+i == 0`,
+    writes i into the slot field and sets the taken byte. **With no such i the record is not given a
+    slot** (`b 0x4B4728`).
+  * So a peer gets one slot per NetworkEntryInfo it creates, as long as the host's queue push and `allocSlot`
+    both succeed. Run 6 has to show which of these steps stopped the second entry.
+
 * Remote car state: the vehicle manager (`0x3CE280`, one per race, n vehicles) creates one
   **`GTVehicle::OnlinePacketCommunicator`** (vtable `0x15938C8`, ctor `0x3CB474`) sized for **all**
   vehicles. Layout: `+0x04` u32 *packet[n], `+0x08` s8 remap[n] (init −1) and `+0x0C` enabled.
@@ -257,6 +278,10 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   one-shot `w32` fired during the EBOOT stage, and that memory was replaced when EMAIN loaded. Use `w32!` (every
   poll) for N. The block again showed one hook call for the whole run (lobby/room entry plus the race), so N
   must already be set when entering the lobby.
+* **Run 6 (09:01, solo Trial Mountain, N = 1 via `w32!`):** no second car. Block: N=1, 1 hook call, first
+  result 1, **1 extra entry accepted** (the second `requestEntry` returned 1). The slot reads were not
+  conclusive: ControlType 0 is also the value of an unused slot. Next run reads the slot-allocation
+  chain (see "Slot allocation") with in-use flags `slot+0x4D8`, RM, the taken bytes and the ring indices.
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
