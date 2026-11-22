@@ -302,6 +302,19 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   So both entries exist as slots, and practice sends **one** of the player's entries out (the newer one)
   while the other stays in the garage. Practice is per player, so this says nothing yet about a race. Next:
   enter the race (sign up) and have the host start it, so that every RACER entry should go ON_GRID (1).
+* **Run 9 (09:26, real race: Enter, then host starts, N = 1):** the HUD showed 1/1. RunningState of slots
+  0..3 = 9, 0, 9, 9: the duplicate (slot 1) races and the original (slot 0) stays IN_GARAGE. Signing up did
+  not call `Race::entry` again (still one hook call). Why:
+  * `setRunningState` `0x4A19F0` stores the state only if **EntryLevel** `slot+0x20` == 1 (RACER), otherwise 9.
+  * EntryLevel comes from a pending value at `slot+0x50C`, applied by `0x4A1400` (called from the build task
+    `0x47E858`, `allocSlot` and others; 3 = none pending).
+  * `0x4A4214` attaches a vehicle: `+0x28` = vehicle, `+0x4D8` = 1, pending EntryLevel 1. Called with
+    vehicle 0 (as in the build task `0x47E7D0`), it detaches and the slot goes back to SPECTATOR.
+  * Run 8 matches: slot 0 has `+0x28` = 0 and EntryLevel 0, while slot 1 holds the vehicle.
+  * So the build gives the **one local player car** to the newest PLAYER entry and takes it away from the
+    older one. The actual vehicle creation goes through a handler, `[Race+0x1F8]` (build record `+0x2C`).
+    An AI entry most likely gets its own car. Next: make the duplicate an AI driver through the probe's
+    word rewrite (`+0x28` offset, `+0x2C` AND, `+0x30` OR), once the blob shows where DriverType is.
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
