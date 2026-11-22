@@ -292,6 +292,16 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   `Race+0x210` and queues the build task `0x47E52C` (OPD `0x16067F8`) on `ctx+0xA18`. The drop is
   after that: the vehicle build, the grid / racer list, or the car is built but not placed. Next run
   dumps both slots in full (436 words each) and both build records, to diff them.
+* **Run 8 (09:21, solo room, Deep Forest, N = 1):** runs 5 to 8 were all the room's **practice** session ("Go
+  to Track"), never a race. The HUD showed 1/1. Diff of the two slots (first 0x400 bytes):
+  * `+0x24` **RunningState**: slot 0 = 9 IN_GARAGE, slot 1 = 7 OUT_LAP
+  * slot 1 has live state: `+0x28` / `+0x2C` pointers, `+0x60..` speeds, world position floats at
+    `+0x2C0..+0x2D8`, `+0x3B4..`
+  * slot 0 has `+0xB8` = `+0xBC` = 1 and `+0xC0` = 0xB4
+  * build records: blobs `0x424D6000` / `0x424D65DC`, both with Race and the right slot pointer
+  So both entries exist as slots, and practice sends **one** of the player's entries out (the newer one)
+  while the other stays in the garage. Practice is per player, so this says nothing yet about a race. Next:
+  enter the race (sign up) and have the host start it, so that every RACER entry should go ON_GRID (1).
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
