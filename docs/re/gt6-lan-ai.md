@@ -246,8 +246,14 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   * RPCS3 maps the data segment with one `falloc` in 64K pages (`vm.cpp` `block_t::falloc`):
     `0x1560000..0x17FFFFF` belongs to the segment. No PRX, HLE stub or patch cave can be placed there
     (the probe's cave is at `0x18E0000`), and the loader only zero-fills filesz..memsz.
-* Still to do: the same solo run with the probe unchecked on the launcher's Patches tab, to see whether
-  these crashes also happen with stock code.
+* **Crashes depend on the track:** Trial Mountain always works, while Autumn Ring and Nürburgring GP crash.
+  This matches upstream issue Mabec-games/Gran-Turismo-6-PC#43 ("LAN mode crashes on certain tracks").
+  Treat runs 2 and 3 as a GT6/RPCS3 LAN bug, not a probe effect. Probe tests use **Trial Mountain**.
+* **Run 4 (19:21:33, all patches, N = 0):** the log ends abruptly at 1:43 with no fatal error and no Windows
+  crash record. The block showed 1 hook call, result 1.
+* **Next: solo Trial Mountain, N = 1.** The host's own second entry should show up as an extra LOCAL slot on
+  the host. The bridge reads the slot count (`[[[0x17FB004]+0x10]+0xA44]+0x18`, if the manager is inline at
+  ctx+0xA10) and ControlType at `+0x4C` of slots 0..3 (array pointer at `ctx+0xA14`, stride 0x6D0).
 
 ## Test setup: two PCs on the same LAN
 
