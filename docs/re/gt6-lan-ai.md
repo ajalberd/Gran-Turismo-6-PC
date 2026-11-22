@@ -100,7 +100,8 @@ rebuild.
 ### Race and entry slots (`GTRace`)
 
 * `Race` (the object at organizer impl `+0xA74`):
-  * `+0x10` → race context. Its `+0xA10` is the **`GTRace::EntrySlotManager`** (vtable `0x1598288`) and
+  * `+0x10` → race context. Its `+0xA10` holds a **pointer** to the **`GTRace::EntrySlotManager`** (vtable `0x1598288`;
+    every caller of `slot()` does `lwz r3,0xA10(ctx)`) and
     its `+0xA24` is a per-slot network-entry array with a 0x38 stride.
   * `+0x6D4` network started (u32), `+0x744` network object (before start), `+0x748` network object
     (running). `0x469264` takes a reference to `+0x748`.
@@ -251,9 +252,13 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
   Treat runs 2 and 3 as a GT6/RPCS3 LAN bug, not a probe effect. Probe tests use **Trial Mountain**.
 * **Run 4 (19:21:33, all patches, N = 0):** the log ends abruptly at 1:43 with no fatal error and no Windows
   crash record. The block showed 1 hook call, result 1.
-* **Next: solo Trial Mountain, N = 1.** The host's own second entry should show up as an extra LOCAL slot on
-  the host. The bridge reads the slot count (`[[[0x17FB004]+0x10]+0xA44]+0x18`, if the manager is inline at
-  ctx+0xA10) and ControlType at `+0x4C` of slots 0..3 (array pointer at `ctx+0xA14`, stride 0x6D0).
+* **Run 5 (20:43, solo Trial Mountain):** this tested nothing, because N was still 0. GT6 boots `EBOOT.BIN`,
+  which exit-spawns `EMAIN.SELF` (the log shows two loader passes, at 0:00:04 and 0:00:29). The bridge's
+  one-shot `w32` fired during the EBOOT stage, and that memory was replaced when EMAIN loaded. Use `w32!` (every
+  poll) for N. The block again showed one hook call for the whole run (lobby/room entry plus the race), so N
+  must already be set when entering the lobby.
+* **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
+  slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
 ## Test setup: two PCs on the same LAN
 
