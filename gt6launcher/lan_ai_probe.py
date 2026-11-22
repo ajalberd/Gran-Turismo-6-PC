@@ -7,9 +7,10 @@ VehicleSettingObject / VehiclePacket / NetworkEntryInfo), and every machine then
 This patch puts a code cave on that call. It always makes the original call, records what it saw in a
 small block at ``BASE`` (unused tail of the RW data segment, past the end of .bss) and, if the u32
 ``BASE+0x00`` is N > 0 (set on the room host only, through the live bridge ``gt6_live.txt``), repeats
-the request N more times (max 8): with the same car setup blob, or with a copy of it in which one word
-is rewritten (``BASE+0x28`` byte offset != 0: word = (word & AND) | OR) - meant for switching the
-DriverType of the copies to AI once the blob layout is known.
+the request N more times (max 8): with the same car setup blob, or - if the rewrite count ``BASE+0x40`` is
+non-zero - with a copy of it in which up to 4 words are rewritten (``word = (word & AND) | OR`` at a
+word-aligned byte offset, 0 allowed). Used to change the copies' header (local player index, byte 0) or
+driver records.
 
 With N = 0 (the default) it only records, so the game behaves as stock.
 
@@ -17,7 +18,7 @@ Block layout (u32 unless noted):
   +0x00 N extra entries (bridge writes)      +0x04 Race*              +0x08 blob*      +0x0C blob size
   +0x10 net*                                 +0x14 first result       +0x18 hook calls +0x1C extra entries accepted
   +0x20 arg r6                               +0x24 arg r7
-  +0x28 patch offset (bridge, 0 = off)       +0x2C AND mask (bridge)  +0x30 OR mask (bridge)
+  +0x40 rewrite count 0..4 (bridge)          +0x44 + i*0xC: {byte offset, AND, OR} (bridge)
   +0x100..+0x7FF copy of the blob (up to 0x700 bytes)
 """
 from __future__ import annotations
@@ -36,6 +37,9 @@ BASE = 0x017FB000
 COPY_OFF = 0x100
 COPY_MAX = 0x700
 MAX_EXTRA = 8
+RW_COUNT = 0x40            # rewrite table: count, then {offset, AND, OR} entries
+RW_TABLE = 0x44
+RW_MAX = 4
 
 
 # --------------------------------------------------------------------------- tiny PPC encoder
@@ -63,6 +67,7 @@ def lwzx(rt, ra, rb): return _x(rt, ra, rb, 23)
 def stwx(rs, ra, rb): return _x(rs, ra, rb, 151)
 def and_(ra, rs, rb): return _x(rs, ra, rb, 28)
 def or_(ra, rs, rb): return _x(rs, ra, rb, 444)
+def rlwinm(ra, rs, sh, mb, me): return (21 << 26) | (rs << 21) | (ra << 16) | (sh << 11) | (mb << 6) | (me << 1)
 def srwi(ra, rs, n): return (21 << 26) | (rs << 21) | (ra << 16) | ((32 - n) << 11) | (n << 6) | (31 << 1)
 def mtctr(rs): return 0x7C0903A6 | (rs << 21)
 
@@ -126,11 +131,16 @@ def cave_words() -> list[int]:
         ("label", "copy"),
         lwzu(0, 4, 8), stwu(0, 4, 9), ("bdnz", "copy"),
         ("label", "copied"),
-        # optional word rewrite in the copy
-        lwz(8, 0x28, 11), cmpwi(8, 0), ("beq", "no_rewrite"),
-        addi(9, 11, COPY_OFF), lwzx(0, 9, 8),
-        lwz(10, 0x2C, 11), and_(0, 0, 10), lwz(10, 0x30, 11), or_(0, 0, 10),
-        stwx(0, 9, 8),
+        # optional word rewrites in the copy (r3..r7 are the call's arguments: use r0, r8..r12 only)
+        lwz(10, RW_COUNT, 11), cmpwi(10, 0), ("beq", "no_rewrite"),
+        cmplwi(10, RW_MAX), ("ble", "rw_ok"), li(10, RW_MAX),
+        ("label", "rw_ok"),
+        mtctr(10), addi(12, 11, RW_TABLE - 0xC), addi(9, 11, COPY_OFF),
+        ("label", "rw"),
+        lwzu(8, 0xC, 12), rlwinm(8, 8, 0, 21, 29),        # offset & 0x7FC (word-aligned, inside the copy)
+        lwzx(0, 9, 8),
+        lwz(10, 4, 12), and_(0, 0, 10), lwz(10, 8, 12), or_(0, 0, 10),
+        stwx(0, 9, 8), ("bdnz", "rw"),
         ("label", "no_rewrite"),
         # the original call (r3..r7 untouched so far)
         *_call_request(),
@@ -144,7 +154,7 @@ def cave_words() -> list[int]:
         ("label", "again"),
         *_base(11),
         lwz(3, 0x70, 1), lwz(4, 0x08, 11), lwz(5, 0x0C, 11),
-        lwz(0, 0x28, 11), cmpwi(0, 0), ("beq", "use_blob"),
+        lwz(0, RW_COUNT, 11), cmpwi(0, 0), ("beq", "use_blob"),
         cmplwi(5, COPY_MAX), ("bgt", "done"),       # copy would be truncated: stop
         addi(4, 11, COPY_OFF),
         ("label", "use_blob"),

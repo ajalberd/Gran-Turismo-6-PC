@@ -215,8 +215,8 @@ so CI `windows.yml` only.
   | `+0x00` | N extra entries (bridge writes it) | `+0x18` | hook calls |
   | `+0x04` | Race* | `+0x1C` | extra entries accepted |
   | `+0x08` | blob* | `+0x20` / `+0x24` | args r6 / r7 |
-  | `+0x0C` | blob size | `+0x28` | rewrite byte offset (0 = off, bridge) |
-  | `+0x10` | net* | `+0x2C` / `+0x30` | AND / OR mask (bridge) |
+  | `+0x0C` | blob size | `+0x40` | rewrite count 0..4 (bridge) |
+  | `+0x10` | net* | `+0x44 + i*0xC` | rewrite i: byte offset (`& 0x7FC`, 0 allowed), AND, OR (bridge) |
   | `+0x14` | first result | `+0x100..+0x7FF` | blob copy |
 
   * The block lives in the unused tail of the **RW data segment**: memsz ends at `0x17F9578`, and RPCS3
@@ -327,6 +327,21 @@ still or drives badly, look at `reduceMemoryForRace` / enemy-line loading for on
 * **Run 11 setup:** the probe's rewrite sets record 0's DriverType to AI in the duplicate's blob copy
   only: offset `0x204` (bytes `98 f0 fd 00`), AND `0xFF0FFFFF`, OR `0x00100000` → `9810fd00`. Bridge:
   `w32! 0x17fb028 0x204 0xff0fffff 0x00100000`.
+* **Run 11 (09:54, real race, copy's record 0 DriverType = AI):** RunningState 9, 1, 9, 9, HUD 1/1. The
+  rewrite was applied (`9810fd00`), but the copy still took the player's car.
+* **Why (build handler):** record `+0x2C` = OPD `0x15F1390` → `0x1DF344` → **`0x1DEEF0`**(obj = record
+  `+4`, slot, record). It decodes the blob with `0x1EBD50`:
+  * a 0x1F-byte bit-packed header (MSB-first reader `0xAD5EC8`, header `0x1EC2C4`): 8 bits → info `+0`,
+    then 1, 1, 1, 3, 3, 32, … bits → info `+4`, `+8`, `+9`, `+0xA`, `+0xB`, `+0xC`, …
+  * then the car and the 4 driver records
+  For a **LOCAL** entry (`entry+0x30` = ControlType != 0 is 0) with `entry+0x34` = info `+0` (blob byte
+  0) != −1, it calls **`0x1DB328`(`[[obj+0x1200]] + idx*0xD8`, slot)**, which sets that local player
+  record's `+0x20` = slot and `+0x5C` = 1. `[obj+0x1200]` = `{base, count}` of local player records. So
+  blob byte 0 is the **local player index**: the copy (index 0) re-binds local player 0, and the
+  original loses its car. Not bounds-checked.
+* **Probe v2:** the single rewrite at `+0x28` is replaced by a table (count `+0x40`, entries at `+0x44`),
+  so byte 0 can be rewritten. Next: read the local player count, then give the copy index 1 (only if
+  count ≥ 2) or find how non-player entries skip this binding.
 * **Bridge reads for the slots:** mgr = `[[[0x17FB004]+0x10]+0xA10]`. The count is at `[mgr+0x34]+0x18`, and
   slot i's ControlType at `[mgr+4] + i*0x6D0 + 0x4C`.
 
